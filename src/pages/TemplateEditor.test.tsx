@@ -55,4 +55,11 @@ describe("TemplateEditor", () => {
     fireEvent.click(screen.getByRole("button", { name: "단계 추가" }));
     expect(screen.getByLabelText("단계 1 프롬프트")).toBeInTheDocument();
   });
+
+  it("shows an error when saveTemplate rejects", async () => {
+    vi.mocked(saveTemplate).mockRejectedValue(new Error("disk full"));
+    render(<TemplateEditor initial={existing} onSaved={vi.fn()} onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "저장" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("disk full");
+  });
 });

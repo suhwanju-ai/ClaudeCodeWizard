@@ -46,13 +46,38 @@ describe("App routing", () => {
       currentStageIndex: 0,
       stages: [{ id: "s1", status: "awaiting-checkpoint", sessionId: "sess1", log: [] }],
     };
-    vi.mocked(startPipelineRun).mockResolvedValue(runRecord);
+    let resolveStart: (value: RunRecord) => void = () => {};
+    vi.mocked(startPipelineRun).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveStart = resolve;
+        })
+    );
 
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "불러와서 실행" }));
 
     await waitFor(() => expect(open).toHaveBeenCalledWith({ directory: true }));
-    await waitFor(() => expect(startPipelineRun).toHaveBeenCalledWith("t1", "/tmp/new-project"));
+    await waitFor(() =>
+      expect(startPipelineRun).toHaveBeenCalledWith("t1", "/tmp/new-project", expect.any(String))
+    );
+
+    // the run view mounts with a pending record before startPipelineRun resolves,
+    // so the stage-event listener is live for the entire first stage
+    expect(await screen.findByText("상태: running")).toBeInTheDocument();
+
+    resolveStart(runRecord);
     expect(await screen.findByText("상태: awaiting-checkpoint")).toBeInTheDocument();
+  });
+
+  it("shows an error and returns to the gallery when startPipelineRun rejects", async () => {
+    vi.mocked(open).mockResolvedValue("/tmp/new-project");
+    vi.mocked(startPipelineRun).mockRejectedValue(new Error("claude CLI not found"));
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "불러와서 실행" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("claude CLI not found");
+    expect(await screen.findByText("웹 프로그램 개발")).toBeInTheDocument();
   });
 });

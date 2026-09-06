@@ -78,4 +78,40 @@ describe("PipelineRun", () => {
     await waitFor(() => expect(rejectCheckpoint).toHaveBeenCalledWith("run1"));
     await waitFor(() => expect(onFinished).toHaveBeenCalled());
   });
+
+  it("shows an error when approveCheckpoint rejects", async () => {
+    vi.mocked(approveCheckpoint).mockRejectedValue(new Error("claude CLI not found"));
+    render(<PipelineRun initialRun={runningRun} onFinished={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "승인" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("claude CLI not found");
+  });
+
+  it("disables checkpoint action buttons while a request is in flight", async () => {
+    let resolveApprove: (value: RunRecord) => void = () => {};
+    vi.mocked(approveCheckpoint).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveApprove = resolve;
+        })
+    );
+    render(<PipelineRun initialRun={runningRun} onFinished={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "승인" }));
+
+    expect(screen.getByRole("button", { name: "승인" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "거부" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "수정 요청 보내기" })).toBeDisabled();
+
+    resolveApprove({ ...runningRun, status: "completed" });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "승인" })).not.toBeInTheDocument());
+  });
+
+  it("always renders a button back to the gallery, even on a dead-end failed run", () => {
+    const failedRun: RunRecord = { ...runningRun, status: "failed" };
+    const onFinished = vi.fn();
+    render(<PipelineRun initialRun={failedRun} onFinished={onFinished} />);
+    const backButton = screen.getByRole("button", { name: "갤러리로 돌아가기" });
+    expect(backButton).toBeInTheDocument();
+    fireEvent.click(backButton);
+    expect(onFinished).toHaveBeenCalled();
+  });
 });

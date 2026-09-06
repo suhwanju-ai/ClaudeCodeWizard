@@ -22,8 +22,8 @@ export function checkCli(): Promise<string> {
   return invoke("check_cli");
 }
 
-export function startPipelineRun(templateId: string, targetDir: string): Promise<RunRecord> {
-  return invoke("start_pipeline_run", { templateId, targetDir });
+export function startPipelineRun(templateId: string, targetDir: string, runId: string): Promise<RunRecord> {
+  return invoke("start_pipeline_run", { templateId, targetDir, runId });
 }
 
 export function approveCheckpoint(runId: string): Promise<RunRecord> {

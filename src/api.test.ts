@@ -59,10 +59,14 @@ describe("api wrapper", () => {
     expect(invokeMock).toHaveBeenCalledWith("check_cli");
   });
 
-  it("startPipelineRun invokes start_pipeline_run with templateId and targetDir", async () => {
+  it("startPipelineRun invokes start_pipeline_run with templateId, targetDir, and runId", async () => {
     invokeMock.mockResolvedValue({});
-    await startPipelineRun("t1", "/tmp/proj");
-    expect(invokeMock).toHaveBeenCalledWith("start_pipeline_run", { templateId: "t1", targetDir: "/tmp/proj" });
+    await startPipelineRun("t1", "/tmp/proj", "run1");
+    expect(invokeMock).toHaveBeenCalledWith("start_pipeline_run", {
+      templateId: "t1",
+      targetDir: "/tmp/proj",
+      runId: "run1",
+    });
   });
 
   it("approveCheckpoint invokes approve_checkpoint with runId", async () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 
 vi.mock("../api", () => ({
   listTemplates: vi.fn(),
@@ -23,6 +23,7 @@ beforeEach(() => {
   vi.mocked(deleteTemplate).mockReset();
   vi.mocked(checkCli).mockReset();
   vi.mocked(checkCli).mockResolvedValue("available:mock-claude 0.0.1");
+  vi.spyOn(window, "confirm").mockReturnValue(true);
 });
 
 describe("TemplateGallery", () => {
@@ -40,13 +41,29 @@ describe("TemplateGallery", () => {
     expect(await screen.findByText(/Claude Code CLI/)).toBeInTheDocument();
   });
 
-  it("calls deleteTemplate and refetches when delete is clicked", async () => {
+  it("calls deleteTemplate and refetches when delete is clicked after confirmation", async () => {
     vi.mocked(listTemplates).mockResolvedValueOnce([sample]).mockResolvedValueOnce([]);
     vi.mocked(deleteTemplate).mockResolvedValue(undefined);
     render(<TemplateGallery onRun={vi.fn()} onEdit={vi.fn()} onNew={vi.fn()} />);
     const deleteButton = await screen.findByRole("button", { name: "삭제" });
-    deleteButton.click();
+    fireEvent.click(deleteButton);
+    expect(window.confirm).toHaveBeenCalled();
     await waitFor(() => expect(deleteTemplate).toHaveBeenCalledWith("t1"));
     await waitFor(() => expect(listTemplates).toHaveBeenCalledTimes(2));
+  });
+
+  it("does not delete when the confirmation is declined", async () => {
+    vi.mocked(listTemplates).mockResolvedValue([sample]);
+    vi.mocked(window.confirm).mockReturnValue(false);
+    render(<TemplateGallery onRun={vi.fn()} onEdit={vi.fn()} onNew={vi.fn()} />);
+    const deleteButton = await screen.findByRole("button", { name: "삭제" });
+    fireEvent.click(deleteButton);
+    expect(deleteTemplate).not.toHaveBeenCalled();
+  });
+
+  it("shows an error when listTemplates rejects", async () => {
+    vi.mocked(listTemplates).mockRejectedValue(new Error("claude CLI not found"));
+    render(<TemplateGallery onRun={vi.fn()} onEdit={vi.fn()} onNew={vi.fn()} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("claude CLI not found");
   });
 });

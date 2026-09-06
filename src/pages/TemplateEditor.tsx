@@ -13,7 +13,7 @@ const KNOWN_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebSearch
 
 function emptyStage(index: number): Stage {
   return {
-    id: `stage-${index}-${Date.now()}`,
+    id: `stage-${index}-${crypto.randomUUID()}`,
     name: `단계 ${index + 1}`,
     prompt: "",
     permissionMode: "acceptEdits",
@@ -37,6 +37,7 @@ export default function TemplateEditor({ initial, onSaved, onCancel }: Props) {
   const [template, setTemplate] = useState<Template>(
     initial ?? { id: `template-${Date.now()}`, name: "", description: "", stages: [] }
   );
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const error = validate(template);
 
@@ -67,12 +68,18 @@ export default function TemplateEditor({ initial, onSaved, onCancel }: Props) {
 
   const handleSave = async () => {
     if (error) return;
-    await saveTemplate(template);
-    onSaved(template);
+    setSaveError(null);
+    try {
+      await saveTemplate(template);
+      onSaved(template);
+    } catch (e) {
+      setSaveError(String(e));
+    }
   };
 
   return (
     <div>
+      {saveError && <p role="alert">{saveError}</p>}
       <label>
         템플릿 이름
         <input value={template.name} onChange={(e) => setTemplate((t) => ({ ...t, name: e.target.value }))} />
