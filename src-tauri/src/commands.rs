@@ -8,6 +8,7 @@ use crate::engine::stream_json::StageEvent;
 use crate::template::Template;
 
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct StageEventPayload {
     run_id: String,
     stage_id: String,
