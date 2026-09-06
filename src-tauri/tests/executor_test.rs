@@ -96,6 +96,24 @@ async fn kills_hung_child_and_returns_error_on_timeout() {
 }
 
 #[tokio::test]
+async fn always_forwards_verbose_alongside_stream_json_output_format() {
+    let dump_dir = tempfile::tempdir().unwrap();
+    let dump_path = dump_dir.path().join("args.txt");
+    let config = ExecutorConfig {
+        claude_binary: env!("CARGO_BIN_EXE_mock_claude").to_string(),
+        extra_env: vec![("MOCK_CLAUDE_DUMP_ARGS".to_string(), dump_path.to_string_lossy().to_string())],
+        ..Default::default()
+    };
+    let target_dir = std::env::temp_dir();
+
+    run_stage(&config, &stage(""), &target_dir, None, |_| {}).await.unwrap();
+
+    let dumped = fs::read_to_string(&dump_path).unwrap();
+    let args: Vec<&str> = dumped.lines().collect();
+    assert!(args.contains(&"--verbose"), "expected --verbose in args: {args:?}");
+}
+
+#[tokio::test]
 async fn forwards_allowed_tools_as_a_comma_joined_flag() {
     let dump_dir = tempfile::tempdir().unwrap();
     let dump_path = dump_dir.path().join("args.txt");

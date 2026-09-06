@@ -44,6 +44,11 @@ pub async fn run_stage<F: FnMut(StageEvent)>(
         .arg("--print")
         .arg("--output-format")
         .arg("stream-json")
+        // claude CLI refuses --print with --output-format=stream-json unless --verbose
+        // is also set ("Error: When using --print, --output-format=stream-json requires
+        // --verbose"). It doesn't change stdout's shape, since parse_line() already
+        // ignores any event `type` it doesn't recognize.
+        .arg("--verbose")
         .arg("--permission-mode")
         .arg(permission_mode_arg(&stage.permission_mode));
 
