@@ -37,11 +37,9 @@ TypeScript 타입 체크 → 프론트엔드 테스트 → Rust 컴파일 체크
 빌드 직전에 `installer/bump-version.cjs`를 호출해 `tauri.conf.json`/`package.json`/`Cargo.toml`의
 patch 버전을 자동으로 1씩 올리므로, 빌드할 때마다 서로 다른 버전의 설치 파일이 생성됩니다.
 
-인스톨러 세부 설정(아이콘 교체 필요, 서명 등)은 `installer/installer-config.md`를 참고하세요.
+인스톨러 세부 설정(아이콘 교체, 서명 등)은 `installer/installer-config.md`를 참고하세요.
 
 ## ⚠️ 배포 전 확인할 것
 
-- `src-tauri/icons/icon.ico`는 현재 개발용 placeholder입니다 — 실제 배포 전
-  `npm run tauri icon <path>`로 진짜 아이콘을 생성하세요. (`installer/installer-config.md` 참고)
 - 코드 서명이 설정되어 있지 않습니다.
 - 이 앱은 최종 사용자 PC에도 `claude` CLI가 설치되어 있어야 동작합니다.

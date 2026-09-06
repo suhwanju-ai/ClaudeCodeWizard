@@ -10,31 +10,29 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.ico"]
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
   }
 }
 ```
 
-## 2. ⚠️ 아이콘 교체 필요
+## 2. 아이콘
 
-`src-tauri/icons/icon.ico`, `icon.png`는 개발 초기에 만든 **70~67바이트짜리 placeholder**입니다.
-실제 배포 전 반드시 진짜 아이콘으로 교체하세요:
+`src-tauri/icons/`는 app-icon-builder로 생성한 실제 아이콘 세트입니다(오렌지 배경 + 세로 3단 점 —
+파이프라인 체크포인트 진행 상태를 형상화). 디자인을 바꾸고 싶으면 1024×1024 PNG를 새로 준비해
+다시 생성하세요:
 
 ```bash
-npm run tauri icon path/to/app-icon.png
-# → src-tauri/icons/ 폴더에 32x32.png, 128x128.png, icon.icns, icon.ico 등 모든 크기 자동 생성
-```
-
-아이콘 생성 후 `tauri.conf.json`의 `bundle.icon` 배열을 전체 크기 세트로 갱신하세요:
-
-```json
-"icon": [
-  "icons/32x32.png",
-  "icons/128x128.png",
-  "icons/128x128@2x.png",
-  "icons/icon.icns",
-  "icons/icon.ico"
-]
+cd src-tauri
+npx tauri icon path/to/new-app-icon.png
+# → icons/ 폴더에 32x32.png, 128x128.png, icon.icns, icon.ico 등 데스크톱용 세트 재생성
+# (iOS/Android 하위 폴더도 함께 생성되는데, 이 프로젝트는 데스크톱 전용이므로
+#  icons/ios/, icons/android/ 는 생성 후 삭제해도 무방합니다)
 ```
 
 ## 3. 배포 전 권장 추가 설정

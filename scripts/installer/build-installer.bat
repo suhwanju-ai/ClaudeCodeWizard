@@ -104,9 +104,7 @@ if errorlevel 1 (
   echo [ERROR] Build failed!
   echo [HINT]  Check the following:
   echo         1. src-tauri/tauri.conf.json "identifier" setting
-  echo         2. src-tauri/icons/icon.ico exists and is a real icon
-  echo            (this project currently ships a tiny placeholder icon -
-  echo             run "npm run tauri icon path\to\app-icon.png" first)
+  echo         2. src-tauri/icons/icon.ico exists
   echo         3. Rust and Node.js versions
   pause & exit /b 1
 )
