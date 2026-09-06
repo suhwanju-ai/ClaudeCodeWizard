@@ -5,6 +5,7 @@ import type { PermissionMode, Stage, Template } from "../types";
 interface Props {
   initial: Template | null;
   onSaved: (template: Template) => void;
+  onRun: (template: Template) => void;
   onCancel: () => void;
 }
 
@@ -36,13 +37,14 @@ function validate(template: Template): string | null {
   return null;
 }
 
-export default function TemplateEditor({ initial, onSaved, onCancel }: Props) {
+export default function TemplateEditor({ initial, onSaved, onRun, onCancel }: Props) {
   const [template, setTemplate] = useState<Template>(
     initial ?? { id: `template-${Date.now()}`, name: "", description: "", stages: [] }
   );
   const [selectedIndex, setSelectedIndex] = useState<number>(template.stages.length > 0 ? 0 : -1);
   const [showJson, setShowJson] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const error = validate(template);
   const selectedStage = selectedIndex >= 0 ? template.stages[selectedIndex] : null;
@@ -87,15 +89,27 @@ export default function TemplateEditor({ initial, onSaved, onCancel }: Props) {
     });
   };
 
-  const handleSave = async () => {
-    if (error) return;
+  const persistTemplate = async (): Promise<boolean> => {
+    if (error) return false;
     setSaveError(null);
+    setBusy(true);
     try {
       await saveTemplate(template);
-      onSaved(template);
+      return true;
     } catch (e) {
       setSaveError(String(e));
+      return false;
+    } finally {
+      setBusy(false);
     }
+  };
+
+  const handleSave = async () => {
+    if (await persistTemplate()) onSaved(template);
+  };
+
+  const handleRun = async () => {
+    if (await persistTemplate()) onRun(template);
   };
 
   return (
@@ -133,8 +147,11 @@ export default function TemplateEditor({ initial, onSaved, onCancel }: Props) {
           <button className="btn btn-outline" onClick={onCancel}>
             취소
           </button>
-          <button className="btn btn-primary" onClick={handleSave} disabled={!!error}>
+          <button className="btn btn-outline" onClick={handleSave} disabled={!!error || busy}>
             저장
+          </button>
+          <button className="btn btn-success" onClick={handleRun} disabled={!!error || busy}>
+            실행
           </button>
         </div>
       </div>

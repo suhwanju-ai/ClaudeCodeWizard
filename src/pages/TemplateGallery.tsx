@@ -3,12 +3,11 @@ import { checkCli, deleteTemplate, listTemplates } from "../api";
 import type { Template } from "../types";
 
 interface Props {
-  onRun: (template: Template) => void;
   onEdit: (template: Template) => void;
   onNew: () => void;
 }
 
-export default function TemplateGallery({ onRun, onEdit, onNew }: Props) {
+export default function TemplateGallery({ onEdit, onNew }: Props) {
   const [templates, setTemplates] = useState<Template[]>([]);
   const [cliStatus, setCliStatus] = useState<string>("available");
   const [error, setError] = useState<string | null>(null);
@@ -51,7 +50,7 @@ export default function TemplateGallery({ onRun, onEdit, onNew }: Props) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22 }}>
         <div>
           <h1 className="page-title">템플릿 갤러리</h1>
-          <p className="page-subtitle">파이프라인 템플릿을 선택해 새 프로젝트 폴더에 실행합니다.</p>
+          <p className="page-subtitle">템플릿을 편집한 뒤, 편집 화면의 실행 버튼으로 새 프로젝트 폴더에 실행합니다.</p>
         </div>
         <button className="btn btn-primary" onClick={onNew}>
           새 템플릿
@@ -93,10 +92,7 @@ export default function TemplateGallery({ onRun, onEdit, onNew }: Props) {
                 paddingTop: 12,
               }}
             >
-              <button className="btn btn-success-subtle" onClick={() => onRun(template)}>
-                불러와서 실행
-              </button>
-              <button className="btn btn-outline" onClick={() => onEdit(template)}>
+              <button className="btn btn-success-subtle" onClick={() => onEdit(template)}>
                 편집
               </button>
               <span style={{ flex: 1 }} />

@@ -15,16 +15,31 @@ vi.mock("./api", () => ({
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 
-import { listTemplates, checkCli, startPipelineRun, onStageEvent } from "./api";
+import { listTemplates, checkCli, saveTemplate, startPipelineRun, onStageEvent } from "./api";
 import { open } from "@tauri-apps/plugin-dialog";
 import App from "./App";
 import type { RunRecord, Template } from "./types";
 
-const sample: Template = { id: "t1", name: "웹 프로그램 개발", description: "desc", stages: [] };
+const sample: Template = {
+  id: "t1",
+  name: "웹 프로그램 개발",
+  description: "desc",
+  stages: [
+    {
+      id: "s1",
+      name: "요구사항",
+      prompt: "PRD 작성",
+      permissionMode: "acceptEdits",
+      allowedTools: [],
+      checkpoint: true,
+    },
+  ],
+};
 
 beforeEach(() => {
   vi.mocked(listTemplates).mockReset().mockResolvedValue([sample]);
   vi.mocked(checkCli).mockReset().mockResolvedValue("available:mock-claude 0.0.1");
+  vi.mocked(saveTemplate).mockReset().mockResolvedValue(undefined);
   vi.mocked(onStageEvent).mockReset().mockResolvedValue(() => {});
   vi.mocked(open).mockReset();
   vi.mocked(startPipelineRun).mockReset();
@@ -36,7 +51,14 @@ describe("App routing", () => {
     expect(await screen.findByText("웹 프로그램 개발")).toBeInTheDocument();
   });
 
-  it("picks a target folder and starts a run when '불러와서 실행' is clicked", async () => {
+  it("does not run a template directly from the gallery — only 편집/삭제 are offered", async () => {
+    render(<App />);
+    await screen.findByText("웹 프로그램 개발");
+    expect(screen.queryByRole("button", { name: "불러와서 실행" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "편집" })).toBeInTheDocument();
+  });
+
+  it("opens the editor from 편집, then picks a target folder and starts a run when 실행 is clicked", async () => {
     vi.mocked(open).mockResolvedValue("/tmp/new-project");
     const runRecord: RunRecord = {
       runId: "run1",
@@ -55,8 +77,10 @@ describe("App routing", () => {
     );
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "불러와서 실행" }));
+    fireEvent.click(await screen.findByRole("button", { name: "편집" }));
+    fireEvent.click(await screen.findByRole("button", { name: "실행" }));
 
+    await waitFor(() => expect(saveTemplate).toHaveBeenCalledWith(sample));
     await waitFor(() => expect(open).toHaveBeenCalledWith({ directory: true }));
     await waitFor(() =>
       expect(startPipelineRun).toHaveBeenCalledWith("t1", "/tmp/new-project", expect.any(String))
@@ -75,7 +99,8 @@ describe("App routing", () => {
     vi.mocked(startPipelineRun).mockRejectedValue(new Error("claude CLI not found"));
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "불러와서 실행" }));
+    fireEvent.click(await screen.findByRole("button", { name: "편집" }));
+    fireEvent.click(await screen.findByRole("button", { name: "실행" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("claude CLI not found");
     expect(await screen.findByText("웹 프로그램 개발")).toBeInTheDocument();

@@ -89,6 +89,7 @@ export default function App() {
       <TemplateEditor
         initial={view.template}
         onSaved={() => setView({ name: "gallery" })}
+        onRun={handleRun}
         onCancel={() => setView({ name: "gallery" })}
       />
     );
@@ -103,7 +104,6 @@ export default function App() {
   } else {
     content = (
       <TemplateGallery
-        onRun={handleRun}
         onEdit={(template) => setView({ name: "editor", template })}
         onNew={() => setView({ name: "editor", template: null })}
       />

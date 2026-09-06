@@ -29,7 +29,7 @@ beforeEach(() => {
 describe("TemplateGallery", () => {
   it("renders templates returned by listTemplates", async () => {
     vi.mocked(listTemplates).mockResolvedValue([sample]);
-    render(<TemplateGallery onRun={vi.fn()} onEdit={vi.fn()} onNew={vi.fn()} />);
+    render(<TemplateGallery onEdit={vi.fn()} onNew={vi.fn()} />);
     expect(await screen.findByText("웹 프로그램 개발")).toBeInTheDocument();
     expect(screen.getByText("요구사항부터 배포까지")).toBeInTheDocument();
   });
@@ -37,14 +37,14 @@ describe("TemplateGallery", () => {
   it("shows a warning banner when the CLI is not found", async () => {
     vi.mocked(listTemplates).mockResolvedValue([]);
     vi.mocked(checkCli).mockResolvedValue("not-found");
-    render(<TemplateGallery onRun={vi.fn()} onEdit={vi.fn()} onNew={vi.fn()} />);
+    render(<TemplateGallery onEdit={vi.fn()} onNew={vi.fn()} />);
     expect(await screen.findByText(/Claude Code CLI/)).toBeInTheDocument();
   });
 
   it("calls deleteTemplate and refetches when delete is clicked after confirmation", async () => {
     vi.mocked(listTemplates).mockResolvedValueOnce([sample]).mockResolvedValueOnce([]);
     vi.mocked(deleteTemplate).mockResolvedValue(undefined);
-    render(<TemplateGallery onRun={vi.fn()} onEdit={vi.fn()} onNew={vi.fn()} />);
+    render(<TemplateGallery onEdit={vi.fn()} onNew={vi.fn()} />);
     const deleteButton = await screen.findByRole("button", { name: "삭제" });
     fireEvent.click(deleteButton);
     expect(window.confirm).toHaveBeenCalled();
@@ -55,7 +55,7 @@ describe("TemplateGallery", () => {
   it("does not delete when the confirmation is declined", async () => {
     vi.mocked(listTemplates).mockResolvedValue([sample]);
     vi.mocked(window.confirm).mockReturnValue(false);
-    render(<TemplateGallery onRun={vi.fn()} onEdit={vi.fn()} onNew={vi.fn()} />);
+    render(<TemplateGallery onEdit={vi.fn()} onNew={vi.fn()} />);
     const deleteButton = await screen.findByRole("button", { name: "삭제" });
     fireEvent.click(deleteButton);
     expect(deleteTemplate).not.toHaveBeenCalled();
@@ -63,7 +63,7 @@ describe("TemplateGallery", () => {
 
   it("shows an error when listTemplates rejects", async () => {
     vi.mocked(listTemplates).mockRejectedValue(new Error("claude CLI not found"));
-    render(<TemplateGallery onRun={vi.fn()} onEdit={vi.fn()} onNew={vi.fn()} />);
+    render(<TemplateGallery onEdit={vi.fn()} onNew={vi.fn()} />);
     expect(await screen.findByRole("alert")).toHaveTextContent("claude CLI not found");
   });
 });

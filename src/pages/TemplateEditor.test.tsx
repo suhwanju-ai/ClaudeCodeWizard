@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 vi.mock("../api", () => ({ saveTemplate: vi.fn() }));
 
@@ -29,37 +29,57 @@ const existing: Template = {
 };
 
 describe("TemplateEditor", () => {
-  it("disables save when a stage prompt is empty", () => {
-    render(<TemplateEditor initial={existing} onSaved={vi.fn()} onCancel={vi.fn()} />);
+  it("disables save and run when a stage prompt is empty", () => {
+    render(<TemplateEditor initial={existing} onSaved={vi.fn()} onRun={vi.fn()} onCancel={vi.fn()} />);
     fireEvent.change(screen.getByLabelText("단계 1 프롬프트"), { target: { value: "" } });
     expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "실행" })).toBeDisabled();
   });
 
-  it("disables save when there are no stages", () => {
-    render(<TemplateEditor initial={null} onSaved={vi.fn()} onCancel={vi.fn()} />);
+  it("disables save and run when there are no stages", () => {
+    render(<TemplateEditor initial={null} onSaved={vi.fn()} onRun={vi.fn()} onCancel={vi.fn()} />);
     expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "실행" })).toBeDisabled();
   });
 
   it("saves the edited template and calls onSaved", async () => {
     const onSaved = vi.fn();
-    render(<TemplateEditor initial={existing} onSaved={onSaved} onCancel={vi.fn()} />);
+    render(<TemplateEditor initial={existing} onSaved={onSaved} onRun={vi.fn()} onCancel={vi.fn()} />);
     fireEvent.change(screen.getByLabelText("템플릿 이름"), { target: { value: "웹 프로그램 개발 v2" } });
     fireEvent.click(screen.getByRole("button", { name: "저장" }));
-    await Promise.resolve();
-    expect(saveTemplate).toHaveBeenCalledWith(expect.objectContaining({ name: "웹 프로그램 개발 v2" }));
-    expect(onSaved).toHaveBeenCalled();
+    await waitFor(() =>
+      expect(saveTemplate).toHaveBeenCalledWith(expect.objectContaining({ name: "웹 프로그램 개발 v2" }))
+    );
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
   });
 
   it("adds a new stage when '단계 추가' is clicked", () => {
-    render(<TemplateEditor initial={null} onSaved={vi.fn()} onCancel={vi.fn()} />);
+    render(<TemplateEditor initial={null} onSaved={vi.fn()} onRun={vi.fn()} onCancel={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "단계 추가" }));
     expect(screen.getByLabelText("단계 1 프롬프트")).toBeInTheDocument();
   });
 
   it("shows an error when saveTemplate rejects", async () => {
     vi.mocked(saveTemplate).mockRejectedValue(new Error("disk full"));
-    render(<TemplateEditor initial={existing} onSaved={vi.fn()} onCancel={vi.fn()} />);
+    render(<TemplateEditor initial={existing} onSaved={vi.fn()} onRun={vi.fn()} onCancel={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "저장" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("disk full");
+  });
+
+  it("saves the template and calls onRun when 실행 is clicked", async () => {
+    const onRun = vi.fn();
+    render(<TemplateEditor initial={existing} onSaved={vi.fn()} onRun={onRun} onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "실행" }));
+    await waitFor(() => expect(saveTemplate).toHaveBeenCalledWith(existing));
+    await waitFor(() => expect(onRun).toHaveBeenCalledWith(existing));
+  });
+
+  it("does not call onRun when saveTemplate rejects on 실행", async () => {
+    vi.mocked(saveTemplate).mockRejectedValue(new Error("disk full"));
+    const onRun = vi.fn();
+    render(<TemplateEditor initial={existing} onSaved={vi.fn()} onRun={onRun} onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "실행" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("disk full");
+    expect(onRun).not.toHaveBeenCalled();
   });
 });
