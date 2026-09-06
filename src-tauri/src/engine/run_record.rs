@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+use crate::template::is_valid_id;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum RunStatus {
@@ -104,6 +106,8 @@ pub enum RunRecordStoreError {
     Json(#[from] serde_json::Error),
     #[error("run '{0}' not found")]
     NotFound(String),
+    #[error("invalid id '{0}': ids must be non-empty, contain only letters, digits, '.', '_', or '-', and not be '.' or '..'")]
+    InvalidId(String),
 }
 
 pub struct RunRecordStore {
@@ -120,6 +124,9 @@ impl RunRecordStore {
     }
 
     pub fn save(&self, record: &RunRecord) -> Result<(), RunRecordStoreError> {
+        if !is_valid_id(&record.run_id) {
+            return Err(RunRecordStoreError::InvalidId(record.run_id.clone()));
+        }
         fs::create_dir_all(&self.dir)?;
         let content = serde_json::to_string_pretty(record)?;
         fs::write(self.path_for(&record.run_id), content)?;
@@ -127,6 +134,9 @@ impl RunRecordStore {
     }
 
     pub fn load(&self, run_id: &str) -> Result<RunRecord, RunRecordStoreError> {
+        if !is_valid_id(run_id) {
+            return Err(RunRecordStoreError::InvalidId(run_id.to_string()));
+        }
         let path = self.path_for(run_id);
         if !path.exists() {
             return Err(RunRecordStoreError::NotFound(run_id.to_string()));
@@ -210,5 +220,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = RunRecordStore::new(dir.path());
         assert!(matches!(store.load("missing"), Err(RunRecordStoreError::NotFound(_))));
+    }
+
+    #[test]
+    fn store_load_rejects_id_with_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunRecordStore::new(dir.path());
+        assert!(matches!(store.load("../../../etc/passwd"), Err(RunRecordStoreError::InvalidId(_))));
+    }
+
+    #[test]
+    fn store_load_rejects_id_with_slash() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunRecordStore::new(dir.path());
+        assert!(matches!(store.load("sub/dir"), Err(RunRecordStoreError::InvalidId(_))));
+    }
+
+    #[test]
+    fn store_save_rejects_id_with_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunRecordStore::new(dir.path());
+        let mut r = record(&["a"]);
+        r.run_id = "../../../etc/passwd".to_string();
+        assert!(matches!(store.save(&r), Err(RunRecordStoreError::InvalidId(_))));
     }
 }
