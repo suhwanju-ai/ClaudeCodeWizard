@@ -3,8 +3,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("@tauri-apps/api/core");
 vi.mock("@tauri-apps/api/event");
 
-import { invoke as invokeMock } from "@tauri-apps/api/core";
-import { listen as listenMock } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   listTemplates,
   loadTemplate,
@@ -18,6 +18,9 @@ import {
   onStageEvent,
 } from "./api";
 import type { Template } from "./types";
+
+const invokeMock = vi.mocked(invoke);
+const listenMock = vi.mocked(listen);
 
 beforeEach(() => {
   invokeMock.mockReset();
@@ -82,8 +85,12 @@ describe("api wrapper", () => {
 
   it("onStageEvent listens on pipeline://stage-event and forwards the payload", async () => {
     const handler = vi.fn();
-    listenMock.mockImplementation((_event, cb) => {
-      cb({ payload: { runId: "run1", stageId: "s1", event: { kind: "init", sessionId: "sess1" } } });
+    listenMock.mockImplementation((_event: string, cb: (event: { payload: unknown; id: number; event: string }) => void) => {
+      cb({
+        payload: { runId: "run1", stageId: "s1", event: { kind: "init", sessionId: "sess1" } },
+        id: 1,
+        event: "pipeline://stage-event"
+      });
       return Promise.resolve(() => {});
     });
     await onStageEvent(handler);
