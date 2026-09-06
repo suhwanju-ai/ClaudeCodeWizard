@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 
 vi.mock("../api", () => ({
   onStageEvent: vi.fn(),
@@ -45,7 +45,9 @@ describe("PipelineRun", () => {
       return Promise.resolve(() => {});
     });
     render(<PipelineRun initialRun={runningRun} onFinished={vi.fn()} />);
-    capturedHandler({ runId: "run1", stageId: "s1", event: { kind: "assistantText", text: "작업 중입니다" } });
+    act(() => {
+      capturedHandler({ runId: "run1", stageId: "s1", event: { kind: "assistantText", text: "작업 중입니다" } });
+    });
     expect(await screen.findByText("작업 중입니다")).toBeInTheDocument();
   });
 
