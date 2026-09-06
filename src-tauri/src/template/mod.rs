@@ -43,7 +43,7 @@ pub enum TemplateValidationError {
     InvalidId(String),
 }
 
-fn is_valid_id(id: &str) -> bool {
+pub(crate) fn is_valid_id(id: &str) -> bool {
     !id.is_empty()
         && id != "."
         && id != ".."

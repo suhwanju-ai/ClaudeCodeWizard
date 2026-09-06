@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use super::{validate_template, Template, TemplateValidationError};
+use super::{is_valid_id, validate_template, Template, TemplateValidationError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -13,6 +13,8 @@ pub enum StoreError {
     Validation(#[from] TemplateValidationError),
     #[error("template '{0}' not found")]
     NotFound(String),
+    #[error("invalid id '{0}': ids must be non-empty, contain only letters, digits, '.', '_', or '-', and not be '.' or '..'")]
+    InvalidId(String),
 }
 
 pub struct TemplateStore {
@@ -46,6 +48,9 @@ impl TemplateStore {
     }
 
     pub fn load(&self, id: &str) -> Result<Template, StoreError> {
+        if !is_valid_id(id) {
+            return Err(StoreError::InvalidId(id.to_string()));
+        }
         let path = self.path_for(id);
         if !path.exists() {
             return Err(StoreError::NotFound(id.to_string()));
@@ -63,6 +68,9 @@ impl TemplateStore {
     }
 
     pub fn delete(&self, id: &str) -> Result<(), StoreError> {
+        if !is_valid_id(id) {
+            return Err(StoreError::InvalidId(id.to_string()));
+        }
         let path = self.path_for(id);
         if !path.exists() {
             return Err(StoreError::NotFound(id.to_string()));
@@ -148,5 +156,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = TemplateStore::new(dir.path());
         assert!(matches!(store.delete("missing"), Err(StoreError::NotFound(_))));
+    }
+
+    #[test]
+    fn load_rejects_id_with_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemplateStore::new(dir.path());
+        assert!(matches!(store.load("../../../etc/passwd"), Err(StoreError::InvalidId(_))));
+    }
+
+    #[test]
+    fn load_rejects_id_with_slash() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemplateStore::new(dir.path());
+        assert!(matches!(store.load("sub/dir"), Err(StoreError::InvalidId(_))));
+    }
+
+    #[test]
+    fn delete_rejects_id_with_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemplateStore::new(dir.path());
+        assert!(matches!(store.delete("../../../etc/passwd"), Err(StoreError::InvalidId(_))));
+    }
+
+    #[test]
+    fn delete_rejects_id_with_slash() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TemplateStore::new(dir.path());
+        assert!(matches!(store.delete("sub/dir"), Err(StoreError::InvalidId(_))));
     }
 }
