@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::template::{PermissionMode, Stage};
@@ -50,17 +50,38 @@ pub async fn run_stage<F: FnMut(StageEvent)>(
 
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().expect("stdout was piped");
-    let mut reader = BufReader::new(stdout).lines();
+    let stderr = child.stderr.take().expect("stderr was piped");
 
-    while let Some(line) = reader.next_line().await? {
-        match parse_line(&line) {
-            Ok(event) => on_event(event),
-            Err(warning) => on_event(StageEvent::Unknown {
-                raw: serde_json::json!({ "parseWarning": warning.0 }),
-            }),
+    let stderr_drain = tokio::spawn(async move {
+        let mut sink = Vec::new();
+        let _ = BufReader::new(stderr).read_to_end(&mut sink).await;
+    });
+
+    let mut reader = BufReader::new(stdout).lines();
+    let mut stdout_error = None;
+
+    loop {
+        match reader.next_line().await {
+            Ok(Some(line)) => match parse_line(&line) {
+                Ok(event) => on_event(event),
+                Err(warning) => on_event(StageEvent::Unknown {
+                    raw: serde_json::json!({ "parseWarning": warning.0 }),
+                }),
+            },
+            Ok(None) => break,
+            Err(e) => {
+                stdout_error = Some(e);
+                break;
+            }
         }
     }
 
+    let _ = stderr_drain.await;
     let status = child.wait().await?;
+
+    if let Some(e) = stdout_error {
+        return Err(e);
+    }
+
     Ok(status.code().unwrap_or(-1))
 }
