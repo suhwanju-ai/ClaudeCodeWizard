@@ -1,9 +1,8 @@
 use std::path::Path;
 
 use claude_pipeline_wizard_lib::engine::executor::ExecutorConfig;
-use claude_pipeline_wizard_lib::engine::orchestrator::Orchestrator;
+use claude_pipeline_wizard_lib::engine::orchestrator::{Orchestrator, OrchestratorError};
 use claude_pipeline_wizard_lib::engine::run_record::{RunRecordStore, RunStatus, StageStatus};
-use claude_pipeline_wizard_lib::engine::stream_json::StageEvent;
 use claude_pipeline_wizard_lib::template::store::TemplateStore;
 use claude_pipeline_wizard_lib::template::{PermissionMode, Stage, Template};
 
@@ -47,7 +46,7 @@ fn setup() -> (Orchestrator, tempfile::TempDir, tempfile::TempDir, tempfile::Tem
     let orchestrator = Orchestrator::new(
         template_store,
         RunRecordStore::new(run_dir.path()),
-        ExecutorConfig { claude_binary: env!("CARGO_BIN_EXE_mock_claude").to_string() },
+        ExecutorConfig { claude_binary: env!("CARGO_BIN_EXE_mock_claude").to_string(), ..Default::default() },
     );
     (orchestrator, template_dir, run_dir, target_dir)
 }
@@ -118,4 +117,18 @@ async fn reject_checkpoint_cancels_run() {
 
     let record = orchestrator.reject_checkpoint("run1").unwrap();
     assert_eq!(record.status, RunStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn reject_checkpoint_rejects_a_run_not_awaiting_checkpoint() {
+    let (orchestrator, _t, _r, target_dir) = setup();
+    orchestrator
+        .start_run("two-stage", target_dir.path().to_path_buf(), "run1".to_string(), |_, _| {})
+        .await
+        .unwrap();
+
+    orchestrator.reject_checkpoint("run1").unwrap();
+
+    let result = orchestrator.reject_checkpoint("run1");
+    assert!(matches!(result, Err(OrchestratorError::NotAwaitingCheckpoint(id)) if id == "run1"));
 }

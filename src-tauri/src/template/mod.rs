@@ -39,14 +39,29 @@ pub enum TemplateValidationError {
     EmptyPrompt(String),
     #[error("duplicate stage id '{0}'")]
     DuplicateStageId(String),
+    #[error("invalid id '{0}': ids must be non-empty, contain only letters, digits, '.', '_', or '-', and not be '.' or '..'")]
+    InvalidId(String),
+}
+
+fn is_valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id != "."
+        && id != ".."
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
 pub fn validate_template(template: &Template) -> Result<(), TemplateValidationError> {
+    if !is_valid_id(&template.id) {
+        return Err(TemplateValidationError::InvalidId(template.id.clone()));
+    }
     if template.stages.is_empty() {
         return Err(TemplateValidationError::NoStages);
     }
     let mut seen = std::collections::HashSet::new();
     for stage in &template.stages {
+        if !is_valid_id(&stage.id) {
+            return Err(TemplateValidationError::InvalidId(stage.id.clone()));
+        }
         if stage.prompt.trim().is_empty() {
             return Err(TemplateValidationError::EmptyPrompt(stage.id.clone()));
         }
@@ -102,6 +117,40 @@ mod tests {
     fn accepts_valid_template() {
         let t = template(vec![stage("s1", "do it"), stage("s2", "do more")]);
         assert_eq!(validate_template(&t), Ok(()));
+    }
+
+    #[test]
+    fn rejects_template_id_with_path_separator() {
+        let mut t = template(vec![stage("s1", "do it")]);
+        t.id = "../../etc/passwd".to_string();
+        assert_eq!(validate_template(&t), Err(TemplateValidationError::InvalidId(t.id.clone())));
+    }
+
+    #[test]
+    fn rejects_template_id_of_dot_dot() {
+        let mut t = template(vec![stage("s1", "do it")]);
+        t.id = "..".to_string();
+        assert_eq!(validate_template(&t), Err(TemplateValidationError::InvalidId("..".to_string())));
+    }
+
+    #[test]
+    fn rejects_empty_template_id() {
+        let mut t = template(vec![stage("s1", "do it")]);
+        t.id = "".to_string();
+        assert_eq!(validate_template(&t), Err(TemplateValidationError::InvalidId("".to_string())));
+    }
+
+    #[test]
+    fn accepts_normal_template_id() {
+        let mut t = template(vec![stage("s1", "do it")]);
+        t.id = "web-app-dev".to_string();
+        assert_eq!(validate_template(&t), Ok(()));
+    }
+
+    #[test]
+    fn rejects_stage_id_with_path_separator() {
+        let t = template(vec![stage("../bad", "do it")]);
+        assert_eq!(validate_template(&t), Err(TemplateValidationError::InvalidId("../bad".to_string())));
     }
 
     #[test]

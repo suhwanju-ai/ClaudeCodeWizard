@@ -56,8 +56,8 @@ pub async fn start_pipeline_run(
     orchestrator: State<'_, Orchestrator>,
     template_id: String,
     target_dir: String,
+    run_id: String,
 ) -> Result<RunRecord, String> {
-    let run_id = uuid::Uuid::new_v4().to_string();
     orchestrator
         .start_run(&template_id, target_dir.into(), run_id.clone(), |stage_id, event| {
             emit_stage_event(&app, &run_id, stage_id, event);

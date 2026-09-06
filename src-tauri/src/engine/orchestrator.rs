@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::template::{store::StoreError as TemplateStoreError, store::TemplateStore, Template};
 
@@ -40,6 +40,8 @@ impl Orchestrator {
         let stage_ids: Vec<String> = template.stages.iter().map(|s| s.id.clone()).collect();
         let mut record = RunRecord::new(run_id, template.id.clone(), target_dir.to_string_lossy().to_string(), &stage_ids);
         std::fs::create_dir_all(&target_dir)?;
+        // v1 targets newly created folders only; a non-empty target_dir warning would need
+        // frontend UI beyond this fix wave's scope (see final-review.md #15), so it's not enforced here.
         self.drive(&template, &mut record, &target_dir, None, &mut on_event).await?;
         self.run_store.save(&record)?;
         Ok(record)
@@ -52,7 +54,7 @@ impl Orchestrator {
         &self,
         template: &Template,
         record: &mut RunRecord,
-        target_dir: &PathBuf,
+        target_dir: &Path,
         mut resume_session_id: Option<String>,
         on_event: &mut F,
     ) -> Result<(), OrchestratorError> {
@@ -111,6 +113,8 @@ impl Orchestrator {
         let target_dir = PathBuf::from(record.target_dir.clone());
         let completed = record.approve_current();
         if !completed {
+            record.current_stage_mut().status = StageStatus::Running;
+            self.run_store.save(&record)?;
             self.drive(&template, &mut record, &target_dir, resume_session_id, &mut on_event).await?;
         }
         self.run_store.save(&record)?;
@@ -135,6 +139,11 @@ impl Orchestrator {
 
         let resume_session_id = record.current_stage_mut().session_id.clone();
         let target_dir = PathBuf::from(record.target_dir.clone());
+
+        record.status = RunStatus::Running;
+        record.current_stage_mut().status = StageStatus::Running;
+        self.run_store.save(&record)?;
+
         let mut latest_session_id = resume_session_id.clone();
         let mut collected_log = Vec::new();
 
@@ -160,6 +169,9 @@ impl Orchestrator {
 
     pub fn reject_checkpoint(&self, run_id: &str) -> Result<RunRecord, OrchestratorError> {
         let mut record = self.run_store.load(run_id)?;
+        if record.status != RunStatus::AwaitingCheckpoint {
+            return Err(OrchestratorError::NotAwaitingCheckpoint(run_id.to_string()));
+        }
         record.cancel();
         self.run_store.save(&record)?;
         Ok(record)
