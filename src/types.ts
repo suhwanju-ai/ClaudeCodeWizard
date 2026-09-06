@@ -41,6 +41,7 @@ export type StageEvent =
   | { kind: "toolUse"; name: string; input: unknown }
   | { kind: "toolResult"; content: unknown }
   | { kind: "result"; sessionId: string; success: boolean; result: string | null }
+  | { kind: "processError"; exitCode: number | null; stderr: string }
   | { kind: "unknown"; raw: unknown };
 
 export interface StageEventPayload {

@@ -67,6 +67,7 @@ pub async fn run_stage<F: FnMut(StageEvent)>(
     let stderr_drain = tokio::spawn(async move {
         let mut sink = Vec::new();
         let _ = BufReader::new(stderr).read_to_end(&mut sink).await;
+        sink
     });
 
     let mut reader = BufReader::new(stdout).lines();
@@ -92,17 +93,42 @@ pub async fn run_stage<F: FnMut(StageEvent)>(
 
     if tokio::time::timeout(config.stage_timeout, read_loop).await.is_err() {
         let _ = child.kill().await;
-        let _ = stderr_drain.await;
+        let stderr_bytes = stderr_drain.await.unwrap_or_default();
         let _ = child.wait().await;
+        let minutes = config.stage_timeout.as_secs() / 60;
+        let mut message = format!("{minutes}분 동안 응답이 없어 프로세스를 강제 종료했습니다.");
+        let stderr_text = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
+        if !stderr_text.is_empty() {
+            message.push('\n');
+            message.push_str(&stderr_text);
+        }
+        on_event(StageEvent::ProcessError { exit_code: None, stderr: message });
         return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "stage timed out"));
     }
 
-    let _ = stderr_drain.await;
+    let stderr_bytes = stderr_drain.await.unwrap_or_default();
+    let stderr_text = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
     let status = child.wait().await?;
 
     if let Some(e) = stdout_error {
+        let mut message = format!("claude 프로세스의 표준 출력을 읽는 중 오류가 발생했습니다: {e}");
+        if !stderr_text.is_empty() {
+            message.push('\n');
+            message.push_str(&stderr_text);
+        }
+        on_event(StageEvent::ProcessError { exit_code: status.code(), stderr: message });
         return Err(e);
     }
 
-    Ok(status.code().unwrap_or(-1))
+    let exit_code = status.code().unwrap_or(-1);
+    if exit_code != 0 {
+        let message = if stderr_text.is_empty() {
+            "claude 프로세스가 표준 오류 메시지 없이 실패했습니다.".to_string()
+        } else {
+            stderr_text
+        };
+        on_event(StageEvent::ProcessError { exit_code: status.code(), stderr: message });
+    }
+
+    Ok(exit_code)
 }

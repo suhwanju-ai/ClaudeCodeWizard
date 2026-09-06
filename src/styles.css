@@ -593,9 +593,14 @@ select {
   color: var(--yellow);
 }
 
+.log-line__label--error {
+  color: var(--red-text);
+}
+
 .log-line__body {
   color: var(--text-secondary);
   word-break: break-word;
+  white-space: pre-wrap;
 }
 
 /* ---------- stage timeline (pipeline run) ---------- */

@@ -61,6 +61,24 @@ describe("PipelineRun", () => {
     expect(await screen.findByText("작업 중입니다")).toBeInTheDocument();
   });
 
+  it("shows the exit code and stderr text when a stage fails with a processError event", async () => {
+    let capturedHandler: (payload: StageEventPayload) => void = () => {};
+    vi.mocked(onStageEvent).mockImplementation((handler) => {
+      capturedHandler = handler;
+      return Promise.resolve(() => {});
+    });
+    render(<PipelineRun initialRun={runningRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />);
+    act(() => {
+      capturedHandler({
+        runId: "run1",
+        stageId: "s1",
+        event: { kind: "processError", exitCode: 1, stderr: "Error: unknown slash command '/does-not-exist'" },
+      });
+    });
+    expect(await screen.findByText(/종료 코드 1/)).toBeInTheDocument();
+    expect(screen.getByText(/unknown slash command/)).toBeInTheDocument();
+  });
+
   it("calls approveCheckpoint and updates run state on approve click", async () => {
     const updated: RunRecord = { ...runningRun, status: "completed", currentStageIndex: 1 };
     vi.mocked(approveCheckpoint).mockResolvedValue(updated);

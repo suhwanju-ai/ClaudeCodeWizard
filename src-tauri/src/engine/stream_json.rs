@@ -16,6 +16,14 @@ pub enum StageEvent {
         success: bool,
         result: Option<String>,
     },
+    /// Synthesized by the executor (never parsed from a stream-json line) when the
+    /// claude process exits non-zero, times out, or its stdout can't be read — carries
+    /// whatever it wrote to stderr so the failure is diagnosable from the run log.
+    ProcessError {
+        #[serde(rename = "exitCode")]
+        exit_code: Option<i32>,
+        stderr: String,
+    },
     Unknown { raw: serde_json::Value },
 }
 
@@ -136,5 +144,12 @@ mod tests {
         let event = StageEvent::Init { session_id: "sess-1".to_string() };
         let json = serde_json::to_string(&event).unwrap();
         assert_eq!(json, r#"{"kind":"init","sessionId":"sess-1"}"#);
+    }
+
+    #[test]
+    fn serializes_process_error_with_camel_case_exit_code() {
+        let event = StageEvent::ProcessError { exit_code: Some(1), stderr: "boom".to_string() };
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(json, r#"{"kind":"processError","exitCode":1,"stderr":"boom"}"#);
     }
 }

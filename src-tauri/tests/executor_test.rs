@@ -55,7 +55,14 @@ async fn returns_non_zero_exit_code_on_failure() {
         .unwrap();
 
     assert_eq!(exit_code, 1);
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2);
+    match &events[1] {
+        StageEvent::ProcessError { exit_code, stderr } => {
+            assert_eq!(*exit_code, Some(1));
+            assert!(stderr.contains("unknown slash command"), "unexpected stderr: {stderr}");
+        }
+        other => panic!("expected a ProcessError event, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -69,13 +76,23 @@ async fn kills_hung_child_and_returns_error_on_timeout() {
     let prompt = format!("FIXTURE:{}", fixture.to_string_lossy());
     let target_dir = std::env::temp_dir();
 
+    let mut events = Vec::new();
     let start = std::time::Instant::now();
-    let result = run_stage(&config, &stage(&prompt), &target_dir, None, |_| {}).await;
+    let result = run_stage(&config, &stage(&prompt), &target_dir, None, |e| events.push(e)).await;
     let elapsed = start.elapsed();
 
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
     assert!(elapsed < std::time::Duration::from_secs(5), "expected the hung child to be killed quickly, took {elapsed:?}");
+
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        StageEvent::ProcessError { exit_code, stderr } => {
+            assert_eq!(*exit_code, None);
+            assert!(stderr.contains('분'), "expected a Korean timeout explanation, got: {stderr}");
+        }
+        other => panic!("expected a ProcessError event, got {other:?}"),
+    }
 }
 
 #[tokio::test]

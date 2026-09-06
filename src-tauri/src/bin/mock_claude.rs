@@ -36,6 +36,10 @@ fn main() {
         for line in lines {
             println!("{line}");
         }
+        let stderr_path = format!("{fixture_path}.stderr");
+        if let Ok(stderr_text) = fs::read_to_string(&stderr_path) {
+            eprint!("{stderr_text}");
+        }
         let exit_code_path = format!("{fixture_path}.exitcode");
         let code: i32 = fs::read_to_string(&exit_code_path)
             .ok()

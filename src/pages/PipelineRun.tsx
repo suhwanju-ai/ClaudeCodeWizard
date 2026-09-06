@@ -37,6 +37,10 @@ function describeEvent(payload: StageEventPayload): LogLine | null {
       return { kind: "tool_result", text: typeof e.content === "string" ? e.content : JSON.stringify(e.content) };
     case "result":
       return { kind: "result", text: e.result ?? "(결과 없음)" };
+    case "processError": {
+      const code = e.exitCode === null ? "알 수 없음" : String(e.exitCode);
+      return { kind: "error", text: `종료 코드 ${code}\n${e.stderr}` };
+    }
     default:
       return null;
   }
@@ -46,6 +50,7 @@ function logLabelClass(kind: string): string {
   if (kind === "assistant") return "log-line__label--assistant";
   if (kind === "tool_use" || kind === "tool_result") return "log-line__label--tool";
   if (kind === "result") return "log-line__label--result";
+  if (kind === "error") return "log-line__label--error";
   return "";
 }
 
