@@ -1219,7 +1219,7 @@ git commit -m "test: implement mock_claude fixture binary"
 
 **Files:**
 - Create: `src-tauri/src/cli_check.rs`
-- Modify: `src-tauri/src/lib.rs` (add `mod cli_check;`)
+- Modify: `src-tauri/src/lib.rs` (add `pub mod cli_check;`)
 
 **Interfaces:**
 - Consumes: nothing (takes a binary name/path as a parameter).
@@ -2061,7 +2061,7 @@ pub fn run() {
 }
 ```
 
-`cli_check` must change from `mod cli_check;` (Task 7) to `pub mod cli_check;` here (already done above) since `commands.rs` imports from it.
+`cli_check` was already declared `pub mod cli_check;` in Task 7, which is why `commands.rs` can import from it here.
 
 - [ ] **Step 3: Verify everything compiles**
 
