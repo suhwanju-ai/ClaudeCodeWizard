@@ -1,0 +1,58 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, screen, fireEvent } from "@testing-library/react";
+
+vi.mock("../api", () => ({ saveTemplate: vi.fn() }));
+
+import { saveTemplate } from "../api";
+import TemplateEditor from "./TemplateEditor";
+import type { Template } from "../types";
+
+beforeEach(() => {
+  vi.mocked(saveTemplate).mockReset();
+  vi.mocked(saveTemplate).mockResolvedValue(undefined);
+});
+
+const existing: Template = {
+  id: "t1",
+  name: "웹 프로그램 개발",
+  description: "desc",
+  stages: [
+    {
+      id: "s1",
+      name: "요구사항",
+      prompt: "PRD.md 작성",
+      permissionMode: "acceptEdits",
+      allowedTools: ["Read"],
+      checkpoint: true,
+    },
+  ],
+};
+
+describe("TemplateEditor", () => {
+  it("disables save when a stage prompt is empty", () => {
+    render(<TemplateEditor initial={existing} onSaved={vi.fn()} onCancel={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("단계 1 프롬프트"), { target: { value: "" } });
+    expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+  });
+
+  it("disables save when there are no stages", () => {
+    render(<TemplateEditor initial={null} onSaved={vi.fn()} onCancel={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+  });
+
+  it("saves the edited template and calls onSaved", async () => {
+    const onSaved = vi.fn();
+    render(<TemplateEditor initial={existing} onSaved={onSaved} onCancel={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("템플릿 이름"), { target: { value: "웹 프로그램 개발 v2" } });
+    fireEvent.click(screen.getByRole("button", { name: "저장" }));
+    await Promise.resolve();
+    expect(saveTemplate).toHaveBeenCalledWith(expect.objectContaining({ name: "웹 프로그램 개발 v2" }));
+    expect(onSaved).toHaveBeenCalled();
+  });
+
+  it("adds a new stage when '단계 추가' is clicked", () => {
+    render(<TemplateEditor initial={null} onSaved={vi.fn()} onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "단계 추가" }));
+    expect(screen.getByLabelText("단계 1 프롬프트")).toBeInTheDocument();
+  });
+});
