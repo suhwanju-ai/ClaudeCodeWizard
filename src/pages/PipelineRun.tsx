@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { approveCheckpoint, onStageEvent, rejectCheckpoint, requestChanges } from "../api";
-import type { RunRecord, StageEventPayload, StageStatus } from "../types";
+import type { RunRecord, StageEventPayload, StageStatus, Template } from "../types";
 
 interface Props {
   initialRun: RunRecord;
+  template: Template;
   onFinished: () => void;
-  templateName?: string;
+  onEditTemplate: (template: Template) => void;
 }
 
 interface LogLine {
@@ -63,8 +64,9 @@ function statusBadgeClass(status: RunRecord["status"]): string {
   return "badge";
 }
 
-export default function PipelineRun({ initialRun, onFinished, templateName }: Props) {
+export default function PipelineRun({ initialRun, template, onFinished, onEditTemplate }: Props) {
   const [run, setRun] = useState<RunRecord>(initialRun);
+  const stageNameById = new Map(template.stages.map((s) => [s.id, s.name]));
   const [log, setLog] = useState<LogLine[]>([]);
   const [changedFiles, setChangedFiles] = useState<string[]>([]);
   const [feedback, setFeedback] = useState("");
@@ -143,7 +145,7 @@ export default function PipelineRun({ initialRun, onFinished, templateName }: Pr
   return (
     <div style={{ display: "flex", gap: 28, alignItems: "flex-start" }}>
       <div style={{ width: 240, flexShrink: 0 }}>
-        <h1 className="page-title">{templateName ?? run.templateId}</h1>
+        <h1 className="page-title">{template.name}</h1>
         <p className="page-subtitle mono" style={{ marginBottom: 18, wordBreak: "break-all" }}>
           {run.targetDir}
         </p>
@@ -152,7 +154,7 @@ export default function PipelineRun({ initialRun, onFinished, templateName }: Pr
             <li key={stage.id} className="stage-timeline__item">
               <span className={`stage-timeline__dot ${stageDotClass(stage.status)}`} />
               <div className="stage-timeline__name">
-                {stage.id}: {stage.status}
+                {stageNameById.get(stage.id) ?? stage.id}: {stage.status}
               </div>
               {stage.sessionId && <div className="stage-timeline__meta">{stage.sessionId}</div>}
             </li>
@@ -221,7 +223,10 @@ export default function PipelineRun({ initialRun, onFinished, templateName }: Pr
           </div>
         )}
 
-        <div style={{ marginTop: 18 }}>
+        <div style={{ marginTop: 18, display: "flex", gap: 8 }}>
+          <button className="btn btn-outline" onClick={() => onEditTemplate(template)}>
+            템플릿 편집
+          </button>
           <button className="btn btn-outline" onClick={onFinished}>
             갤러리로 돌아가기
           </button>

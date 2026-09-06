@@ -10,7 +10,7 @@ import type { RunRecord, Template } from "./types";
 type View =
   | { name: "gallery" }
   | { name: "editor"; template: Template | null }
-  | { name: "run"; run: RunRecord; templateName: string };
+  | { name: "run"; run: RunRecord; template: Template };
 
 function CliStatus() {
   const [status, setStatus] = useState<string>("checking");
@@ -74,9 +74,9 @@ export default function App() {
         currentStageIndex: 0,
         stages: template.stages.map((s) => ({ id: s.id, status: "pending", sessionId: null, log: [] })),
       };
-      setView({ name: "run", run: pendingRun, templateName: template.name });
+      setView({ name: "run", run: pendingRun, template });
       const run = await startPipelineRun(template.id, targetDir, runId);
-      setView({ name: "run", run, templateName: template.name });
+      setView({ name: "run", run, template });
     } catch (e) {
       setError(String(e));
       setView({ name: "gallery" });
@@ -97,8 +97,9 @@ export default function App() {
     content = (
       <PipelineRun
         initialRun={view.run}
-        templateName={view.templateName}
+        template={view.template}
         onFinished={() => setView({ name: "gallery" })}
+        onEditTemplate={(template) => setView({ name: "editor", template })}
       />
     );
   } else {

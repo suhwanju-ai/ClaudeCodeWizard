@@ -10,7 +10,7 @@ vi.mock("../api", () => ({
 
 import { onStageEvent, approveCheckpoint, requestChanges, rejectCheckpoint } from "../api";
 import PipelineRun from "./PipelineRun";
-import type { RunRecord, StageEventPayload } from "../types";
+import type { RunRecord, StageEventPayload, Template } from "../types";
 
 const runningRun: RunRecord = {
   runId: "run1",
@@ -24,6 +24,16 @@ const runningRun: RunRecord = {
   ],
 };
 
+const sampleTemplate: Template = {
+  id: "t1",
+  name: "웹 프로그램 개발",
+  description: "desc",
+  stages: [
+    { id: "s1", name: "요구사항 정리", prompt: "p1", permissionMode: "acceptEdits", allowedTools: [], checkpoint: true },
+    { id: "s2", name: "구현", prompt: "p2", permissionMode: "acceptEdits", allowedTools: [], checkpoint: true },
+  ],
+};
+
 beforeEach(() => {
   vi.mocked(onStageEvent).mockReset();
   vi.mocked(onStageEvent).mockResolvedValue(() => {});
@@ -34,7 +44,7 @@ beforeEach(() => {
 
 describe("PipelineRun", () => {
   it("shows the checkpoint panel when the run is awaiting checkpoint", () => {
-    render(<PipelineRun initialRun={runningRun} onFinished={vi.fn()} />);
+    render(<PipelineRun initialRun={runningRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />);
     expect(screen.getByRole("button", { name: "승인" })).toBeInTheDocument();
   });
 
@@ -44,7 +54,7 @@ describe("PipelineRun", () => {
       capturedHandler = handler;
       return Promise.resolve(() => {});
     });
-    render(<PipelineRun initialRun={runningRun} onFinished={vi.fn()} />);
+    render(<PipelineRun initialRun={runningRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />);
     act(() => {
       capturedHandler({ runId: "run1", stageId: "s1", event: { kind: "assistantText", text: "작업 중입니다" } });
     });
@@ -54,7 +64,7 @@ describe("PipelineRun", () => {
   it("calls approveCheckpoint and updates run state on approve click", async () => {
     const updated: RunRecord = { ...runningRun, status: "completed", currentStageIndex: 1 };
     vi.mocked(approveCheckpoint).mockResolvedValue(updated);
-    render(<PipelineRun initialRun={runningRun} onFinished={vi.fn()} />);
+    render(<PipelineRun initialRun={runningRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "승인" }));
     await waitFor(() => expect(approveCheckpoint).toHaveBeenCalledWith("run1"));
     expect(await screen.findByText(/completed/)).toBeInTheDocument();
@@ -63,7 +73,7 @@ describe("PipelineRun", () => {
   it("submits feedback via requestChanges", async () => {
     const updated: RunRecord = { ...runningRun };
     vi.mocked(requestChanges).mockResolvedValue(updated);
-    render(<PipelineRun initialRun={runningRun} onFinished={vi.fn()} />);
+    render(<PipelineRun initialRun={runningRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />);
     fireEvent.change(screen.getByLabelText("수정 요청 내용"), { target: { value: "더 자세히 써줘" } });
     fireEvent.click(screen.getByRole("button", { name: "수정 요청 보내기" }));
     await waitFor(() => expect(requestChanges).toHaveBeenCalledWith("run1", "더 자세히 써줘"));
@@ -73,7 +83,7 @@ describe("PipelineRun", () => {
     const onFinished = vi.fn();
     const cancelled: RunRecord = { ...runningRun, status: "cancelled" };
     vi.mocked(rejectCheckpoint).mockResolvedValue(cancelled);
-    render(<PipelineRun initialRun={runningRun} onFinished={onFinished} />);
+    render(<PipelineRun initialRun={runningRun} template={sampleTemplate} onFinished={onFinished} onEditTemplate={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "거부" }));
     await waitFor(() => expect(rejectCheckpoint).toHaveBeenCalledWith("run1"));
     await waitFor(() => expect(onFinished).toHaveBeenCalled());
@@ -81,7 +91,7 @@ describe("PipelineRun", () => {
 
   it("shows an error when approveCheckpoint rejects", async () => {
     vi.mocked(approveCheckpoint).mockRejectedValue(new Error("claude CLI not found"));
-    render(<PipelineRun initialRun={runningRun} onFinished={vi.fn()} />);
+    render(<PipelineRun initialRun={runningRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "승인" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("claude CLI not found");
   });
@@ -94,7 +104,7 @@ describe("PipelineRun", () => {
           resolveApprove = resolve;
         })
     );
-    render(<PipelineRun initialRun={runningRun} onFinished={vi.fn()} />);
+    render(<PipelineRun initialRun={runningRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "승인" }));
 
     expect(screen.getByRole("button", { name: "승인" })).toBeDisabled();
@@ -108,10 +118,25 @@ describe("PipelineRun", () => {
   it("always renders a button back to the gallery, even on a dead-end failed run", () => {
     const failedRun: RunRecord = { ...runningRun, status: "failed" };
     const onFinished = vi.fn();
-    render(<PipelineRun initialRun={failedRun} onFinished={onFinished} />);
+    render(<PipelineRun initialRun={failedRun} template={sampleTemplate} onFinished={onFinished} onEditTemplate={vi.fn()} />);
     const backButton = screen.getByRole("button", { name: "갤러리로 돌아가기" });
     expect(backButton).toBeInTheDocument();
     fireEvent.click(backButton);
     expect(onFinished).toHaveBeenCalled();
+  });
+
+  it("shows each stage's configured name instead of its raw id", () => {
+    render(<PipelineRun initialRun={runningRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />);
+    expect(screen.getByText("요구사항 정리: awaiting-checkpoint")).toBeInTheDocument();
+    expect(screen.getByText("구현: pending")).toBeInTheDocument();
+    expect(screen.queryByText(/^s1:/)).not.toBeInTheDocument();
+  });
+
+  it("lets the user jump to the template editor from a failed run", () => {
+    const failedRun: RunRecord = { ...runningRun, status: "failed" };
+    const onEditTemplate = vi.fn();
+    render(<PipelineRun initialRun={failedRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={onEditTemplate} />);
+    fireEvent.click(screen.getByRole("button", { name: "템플릿 편집" }));
+    expect(onEditTemplate).toHaveBeenCalledWith(sampleTemplate);
   });
 });
