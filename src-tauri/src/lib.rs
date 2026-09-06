@@ -1,3 +1,4 @@
+pub mod cli_check;
 pub mod engine;
 pub mod template;
 
