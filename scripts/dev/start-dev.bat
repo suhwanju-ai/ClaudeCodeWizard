@@ -48,11 +48,38 @@ if errorlevel 1 (
   echo [OK] claude CLI found
 )
 
+:: Detect git (used below to self-heal a corrupted package.json/package-lock.json)
+where git >nul 2>&1
+set "HAS_GIT=1"
+if errorlevel 1 set "HAS_GIT=0"
+
 :: Install dependencies
 if not exist "node_modules" (
   echo [INFO] Installing dependencies via %PKG_MGR%...
   call %PKG_MGR% install
-  if errorlevel 1 ( echo [ERROR] Dependency install failed! & pause & exit /b 1 )
+  if errorlevel 1 (
+    echo [WARN] Dependency install failed.
+    if "%HAS_GIT%"=="1" (
+      git diff --quiet -- package.json package-lock.json >nul 2>&1
+      if errorlevel 1 (
+        echo [WARN] package.json/package-lock.json differ from the last commit
+        echo        ^(a known issue: something occasionally bumps vite/vitest to
+        echo        versions that conflict with @vitejs/plugin-react^). Resetting
+        echo        both files to the committed version and retrying once...
+        call git checkout -- package.json package-lock.json
+        call %PKG_MGR% install
+        if errorlevel 1 ( echo [ERROR] Dependency install still failing after reset! & pause & exit /b 1 )
+      ) else (
+        echo [ERROR] Dependency install failed and package.json/package-lock.json
+        echo         already match the last commit - this is not the known
+        echo         version-drift issue. See the npm error above.
+        pause & exit /b 1
+      )
+    ) else (
+      echo [ERROR] Dependency install failed and git is not available to self-heal.
+      pause & exit /b 1
+    )
+  )
 )
 echo [OK] Dependencies ready
 

@@ -35,7 +35,26 @@ PKG_MGR="npm"
 # 의존성 확인
 if [ ! -d "node_modules" ]; then
   echo -e "${YELLOW}📦 의존성 설치 중 (${PKG_MGR})...${NC}"
-  $PKG_MGR install
+  if ! $PKG_MGR install; then
+    echo -e "${YELLOW}⚠️  의존성 설치 실패.${NC}"
+    if ! command -v git >/dev/null 2>&1; then
+      echo -e "${RED}❌ git을 찾을 수 없어 자동 복구를 시도할 수 없습니다. 위 npm 오류를 확인하세요.${NC}"
+      exit 1
+    fi
+    if git diff --quiet -- package.json package-lock.json 2>/dev/null; then
+      echo -e "${RED}❌ package.json/package-lock.json는 이미 마지막 커밋과 동일합니다 —${NC}"
+      echo -e "${RED}   알려진 버전 충돌 문제가 아닙니다. 위 npm 오류를 확인하세요.${NC}"
+      exit 1
+    fi
+    echo -e "${YELLOW}⚠️  package.json/package-lock.json가 마지막 커밋과 다릅니다${NC}"
+    echo -e "${YELLOW}   (가끔 vite/vitest가 @vitejs/plugin-react와 충돌하는 버전으로${NC}"
+    echo -e "${YELLOW}   바뀌는 알려진 문제) — 커밋된 상태로 되돌리고 한 번 재시도합니다...${NC}"
+    git checkout -- package.json package-lock.json
+    if ! $PKG_MGR install; then
+      echo -e "${RED}❌ 초기화 후에도 의존성 설치 실패${NC}"
+      exit 1
+    fi
+  fi
 fi
 echo -e "${GREEN}✅ 의존성 OK${NC}"
 
