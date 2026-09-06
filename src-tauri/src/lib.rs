@@ -1,3 +1,5 @@
+pub mod template;
+
 pub fn run() {
     tauri::Builder::default()
         .run(tauri::generate_context!())
