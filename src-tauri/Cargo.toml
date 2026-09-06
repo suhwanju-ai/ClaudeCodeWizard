@@ -2,6 +2,7 @@
 name = "claude-pipeline-wizard"
 version = "0.1.0"
 edition = "2021"
+default-run = "claude-pipeline-wizard"
 
 [lib]
 name = "claude_pipeline_wizard_lib"
