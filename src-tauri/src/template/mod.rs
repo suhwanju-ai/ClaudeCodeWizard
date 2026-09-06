@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub mod store;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum PermissionMode {
