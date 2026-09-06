@@ -18,6 +18,9 @@ pub fn run() {
                 RunRecordStore::new(app_data_dir.join("runs")),
                 ExecutorConfig::default(),
             );
+            if let Err(e) = template::seed::seed_default_templates(&orchestrator.template_store) {
+                eprintln!("failed to seed default templates: {e}");
+            }
             app.manage(orchestrator);
             Ok(())
         })
