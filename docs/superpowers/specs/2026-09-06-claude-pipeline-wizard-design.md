@@ -166,8 +166,13 @@ survive by default. The engine preserves it explicitly:
 - Unparseable stream-json lines are logged as warnings without aborting the
   run.
 - If the app crashes or is closed mid-run, the on-disk run record (with the
-  last known `session_id`) lets the user resume the run from where it left
-  off on next launch.
+  last known `session_id`) durably records where the run left off. **v1
+  limitation** (found during final review of the implementation): there is
+  no `list_runs`/`load_run` command or gallery UI to reach that record after
+  a restart, so recovery today is manual (inspecting the JSON file) rather
+  than a resume flow in the app. Building that resume flow is deferred past
+  v1 rather than attempted as a "fix" — it needs new commands and a new UI
+  entry point, not a patch to existing ones.
 
 ## Testing Strategy
 
