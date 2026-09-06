@@ -132,3 +132,95 @@ async fn reject_checkpoint_rejects_a_run_not_awaiting_checkpoint() {
     let result = orchestrator.reject_checkpoint("run1");
     assert!(matches!(result, Err(OrchestratorError::NotAwaitingCheckpoint(id)) if id == "run1"));
 }
+
+fn hanging_two_stage_template() -> Template {
+    Template {
+        id: "hang-two-stage".to_string(),
+        name: "Hang Two Stage".to_string(),
+        description: "desc".to_string(),
+        stages: vec![
+            Stage {
+                id: "stage1".to_string(),
+                name: "Stage 1".to_string(),
+                prompt: fixture_prompt("orchestrator_stage1.jsonl"),
+                permission_mode: PermissionMode::AcceptEdits,
+                allowed_tools: vec![],
+                checkpoint: true,
+            },
+            Stage {
+                id: "stage2".to_string(),
+                name: "Stage 2".to_string(),
+                prompt: fixture_prompt("executor_hang.jsonl"),
+                permission_mode: PermissionMode::AcceptEdits,
+                allowed_tools: vec![],
+                checkpoint: true,
+            },
+        ],
+    }
+}
+
+#[tokio::test]
+async fn approve_checkpoint_marks_run_failed_instead_of_stuck_running_on_drive_timeout() {
+    let template_dir = tempfile::tempdir().unwrap();
+    let run_dir = tempfile::tempdir().unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let template_store = TemplateStore::new(template_dir.path());
+    template_store.save(&hanging_two_stage_template()).unwrap();
+    let orchestrator = Orchestrator::new(
+        template_store,
+        RunRecordStore::new(run_dir.path()),
+        ExecutorConfig {
+            claude_binary: env!("CARGO_BIN_EXE_mock_claude").to_string(),
+            stage_timeout: std::time::Duration::from_millis(100),
+            ..Default::default()
+        },
+    );
+
+    orchestrator
+        .start_run("hang-two-stage", target_dir.path().to_path_buf(), "run1".to_string(), |_, _| {})
+        .await
+        .unwrap();
+
+    let result = orchestrator.approve_checkpoint("run1", |_, _| {}).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Failed);
+    assert_eq!(result.stages[1].status, StageStatus::Failed);
+
+    // The on-disk record must reflect the failure too, not be stuck at "running".
+    let persisted = RunRecordStore::new(run_dir.path()).load("run1").unwrap();
+    assert_eq!(persisted.status, RunStatus::Failed);
+    assert_eq!(persisted.stages[1].status, StageStatus::Failed);
+}
+
+#[tokio::test]
+async fn request_changes_marks_run_failed_instead_of_stuck_running_on_run_stage_timeout() {
+    let template_dir = tempfile::tempdir().unwrap();
+    let run_dir = tempfile::tempdir().unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let template_store = TemplateStore::new(template_dir.path());
+    template_store.save(&two_stage_template()).unwrap();
+    let orchestrator = Orchestrator::new(
+        template_store,
+        RunRecordStore::new(run_dir.path()),
+        ExecutorConfig {
+            claude_binary: env!("CARGO_BIN_EXE_mock_claude").to_string(),
+            stage_timeout: std::time::Duration::from_millis(100),
+            ..Default::default()
+        },
+    );
+
+    orchestrator
+        .start_run("two-stage", target_dir.path().to_path_buf(), "run1".to_string(), |_, _| {})
+        .await
+        .unwrap();
+
+    let hang_feedback = fixture_prompt("executor_hang.jsonl");
+    let result = orchestrator.request_changes("run1", &hang_feedback, |_, _| {}).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Failed);
+    assert_eq!(result.stages[0].status, StageStatus::Failed);
+
+    let persisted = RunRecordStore::new(run_dir.path()).load("run1").unwrap();
+    assert_eq!(persisted.status, RunStatus::Failed);
+    assert_eq!(persisted.stages[0].status, StageStatus::Failed);
+}

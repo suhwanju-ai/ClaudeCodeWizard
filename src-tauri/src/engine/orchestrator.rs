@@ -115,7 +115,9 @@ impl Orchestrator {
         if !completed {
             record.current_stage_mut().status = StageStatus::Running;
             self.run_store.save(&record)?;
-            self.drive(&template, &mut record, &target_dir, resume_session_id, &mut on_event).await?;
+            if self.drive(&template, &mut record, &target_dir, resume_session_id, &mut on_event).await.is_err() {
+                record.mark_current_failed();
+            }
         }
         self.run_store.save(&record)?;
         Ok(record)
@@ -147,21 +149,20 @@ impl Orchestrator {
         let mut latest_session_id = resume_session_id.clone();
         let mut collected_log = Vec::new();
 
-        let exit_code = run_stage(&self.executor_config, &feedback_stage, &target_dir, resume_session_id.as_deref(), |event| {
+        let result = run_stage(&self.executor_config, &feedback_stage, &target_dir, resume_session_id.as_deref(), |event| {
             if let StageEvent::Init { session_id } | StageEvent::Result { session_id, .. } = &event {
                 latest_session_id = Some(session_id.clone());
             }
             collected_log.push(serde_json::to_value(&event).unwrap_or(serde_json::Value::Null));
             on_event(&stage_id, event);
         })
-        .await?;
+        .await;
 
         record.stages[stage_index].log.extend(collected_log);
 
-        if exit_code != 0 {
-            record.mark_current_failed();
-        } else {
-            record.mark_current_awaiting_checkpoint(latest_session_id.unwrap_or_default());
+        match result {
+            Ok(0) => record.mark_current_awaiting_checkpoint(latest_session_id.unwrap_or_default()),
+            _ => record.mark_current_failed(),
         }
         self.run_store.save(&record)?;
         Ok(record)
