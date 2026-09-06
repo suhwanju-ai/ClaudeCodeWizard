@@ -82,13 +82,6 @@ impl Orchestrator {
             let session_id = latest_session_id.unwrap_or_default();
             if stage.checkpoint {
                 record.mark_current_awaiting_checkpoint(session_id);
-                // A checkpoint gates advancing to the next stage. On the last
-                // stage there is nothing left to advance to, so the run is
-                // already complete even though the stage itself still records
-                // AwaitingCheckpoint.
-                if record.current_stage_index + 1 >= record.stages.len() {
-                    record.status = RunStatus::Completed;
-                }
                 return Ok(());
             }
 

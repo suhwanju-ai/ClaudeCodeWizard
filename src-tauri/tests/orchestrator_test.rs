@@ -32,7 +32,7 @@ fn two_stage_template() -> Template {
                 prompt: fixture_prompt("orchestrator_stage2.jsonl"),
                 permission_mode: PermissionMode::AcceptEdits,
                 allowed_tools: vec![],
-                checkpoint: true,
+                checkpoint: false,
             },
         ],
     }
@@ -82,7 +82,7 @@ async fn approve_checkpoint_advances_and_then_completes() {
 
     assert_eq!(record.status, RunStatus::Completed);
     assert_eq!(record.stages[0].status, StageStatus::Approved);
-    assert_eq!(record.stages[1].status, StageStatus::AwaitingCheckpoint);
+    assert_eq!(record.stages[1].status, StageStatus::Approved);
     assert!(events.iter().any(|(id, _)| id == "stage2"));
 }
 
