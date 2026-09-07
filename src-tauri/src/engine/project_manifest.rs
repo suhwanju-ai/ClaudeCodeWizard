@@ -20,7 +20,12 @@ pub fn manifest_dir(target_dir: &Path) -> PathBuf {
 /// Writes the run's live state (`run.json`) and a resolved-template
 /// snapshot (`pipeline.json`, reflecting any per-run stage edits) into a
 /// hidden directory inside the run's target project folder, so the run is
-/// inspectable/editable by hand even without the app's own data directory.
+/// inspectable by hand even without the app's own data directory.
+///
+/// This is a read-only convenience: nothing ever reads these files back in.
+/// The `Orchestrator` always loads run state from `RunRecordStore` (the
+/// app-data directory), so hand-editing `pipeline.json` here has no effect
+/// on the run and is silently overwritten on the next transition.
 pub fn write_project_manifest(
     target_dir: &Path,
     template_id: &str,

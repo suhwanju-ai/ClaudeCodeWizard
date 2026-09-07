@@ -12,6 +12,40 @@ fn fixture_prompt(name: &str) -> String {
     format!("FIXTURE:{}", path.to_string_lossy())
 }
 
+fn three_stage_template() -> Template {
+    Template {
+        id: "three-stage".to_string(),
+        name: "Three Stage".to_string(),
+        description: "desc".to_string(),
+        stages: vec![
+            Stage {
+                id: "stage1".to_string(),
+                name: "Stage 1".to_string(),
+                prompt: fixture_prompt("orchestrator_stage1.jsonl"),
+                permission_mode: PermissionMode::AcceptEdits,
+                allowed_tools: vec![],
+                checkpoint: true,
+            },
+            Stage {
+                id: "stage2".to_string(),
+                name: "Stage 2".to_string(),
+                prompt: fixture_prompt("orchestrator_stage2.jsonl"),
+                permission_mode: PermissionMode::AcceptEdits,
+                allowed_tools: vec![],
+                checkpoint: false,
+            },
+            Stage {
+                id: "stage3".to_string(),
+                name: "Stage 3".to_string(),
+                prompt: fixture_prompt("orchestrator_stage3.jsonl"),
+                permission_mode: PermissionMode::AcceptEdits,
+                allowed_tools: vec![],
+                checkpoint: true,
+            },
+        ],
+    }
+}
+
 fn two_stage_template() -> Template {
     Template {
         id: "two-stage".to_string(),
@@ -292,4 +326,61 @@ async fn request_changes_marks_run_failed_instead_of_stuck_running_on_run_stage_
     let persisted = RunRecordStore::new(run_dir.path()).load("run1").unwrap();
     assert_eq!(persisted.status, RunStatus::Failed);
     assert_eq!(persisted.stages[0].status, StageStatus::Failed);
+}
+
+#[test]
+fn manifest_write_failure_does_not_fail_the_run_or_leave_it_stuck() {
+    let (orchestrator, _t, run_dir, target_dir) = setup();
+
+    // Block project-manifest writes: pre-create the manifest path as a plain
+    // *file*, so `fs::create_dir_all` inside `write_project_manifest` fails
+    // because a non-directory already occupies that exact path. `target_dir`
+    // itself is left as a normal, writable directory, so `run_store.save`
+    // (which writes into the unrelated app-data `run_dir`) is unaffected.
+    std::fs::create_dir_all(target_dir.path()).unwrap();
+    std::fs::write(target_dir.path().join(".claude-pipeline-wizard"), b"blocked").unwrap();
+
+    let record = orchestrator
+        .start_run("two-stage", target_dir.path().to_path_buf(), "run1".to_string())
+        .expect("start_run must succeed even when the project-local manifest write fails");
+
+    assert_eq!(record.status, RunStatus::AwaitingStageStart);
+
+    // The authoritative app-data-dir record must reflect the same state,
+    // proving `run_store.save` actually succeeded and the run isn't stuck.
+    let persisted = RunRecordStore::new(run_dir.path()).load("run1").unwrap();
+    assert_eq!(persisted.status, RunStatus::AwaitingStageStart);
+    assert_eq!(persisted.current_stage_index, 0);
+}
+
+#[tokio::test]
+async fn middle_non_checkpoint_stage_stops_and_does_not_auto_advance_into_next_stage() {
+    let template_dir = tempfile::tempdir().unwrap();
+    let run_dir = tempfile::tempdir().unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let template_store = TemplateStore::new(template_dir.path());
+    template_store.save(&three_stage_template()).unwrap();
+    let orchestrator = Orchestrator::new(
+        template_store,
+        RunRecordStore::new(run_dir.path()),
+        ExecutorConfig { claude_binary: env!("CARGO_BIN_EXE_mock_claude").to_string(), ..Default::default() },
+    );
+
+    orchestrator.start_run("three-stage", target_dir.path().to_path_buf(), "run1".to_string()).unwrap();
+    // stage1 (checkpoint: true) runs and pauses at its checkpoint.
+    orchestrator.start_stage("run1", None, |_, _| {}).await.unwrap();
+    // Approving advances to stage2 (checkpoint: false), paused for pre-stage edit.
+    orchestrator.approve_checkpoint("run1").unwrap();
+
+    // Running stage2 (checkpoint: false) must NOT auto-run stage3 as a side effect --
+    // it should stop and wait for its own explicit `start_stage` call, just like a
+    // checkpointed stage would.
+    let record = orchestrator.start_stage("run1", None, |_, _| {}).await.unwrap();
+
+    assert_eq!(record.status, RunStatus::AwaitingStageStart);
+    assert_eq!(record.current_stage_index, 2);
+    assert_eq!(record.stages[1].status, StageStatus::Approved);
+    // Stage 3 is only paused for its pre-stage edit gate -- it was not executed.
+    assert_eq!(record.stages[2].status, StageStatus::AwaitingStart);
+    assert_eq!(record.stages[2].session_id, None);
 }

@@ -41,15 +41,29 @@ impl Orchestrator {
         Self { template_store, run_store, executor_config }
     }
 
+    /// Persists `record` to the authoritative app-data-dir store, then makes a
+    /// best-effort attempt to mirror it into the target project's own
+    /// `.claude-pipeline-wizard/` folder for inspection.
+    ///
+    /// The project-local manifest write is deliberately non-fatal: `run_store`
+    /// is the source of truth for the state machine, and every caller here
+    /// gates entry on `record.status` as loaded from `run_store`. If the
+    /// project-local write failed silently but `save()` still returned `Err`,
+    /// the in-memory/`run_store` state would already have advanced (e.g. to
+    /// `Running`) past what any entry gate accepts, permanently stranding the
+    /// run with no in-app recovery. So a manifest-write failure is logged and
+    /// swallowed here; only a `run_store.save` failure is fatal.
     fn save(&self, template: &Template, record: &RunRecord) -> Result<(), OrchestratorError> {
         self.run_store.save(record)?;
-        write_project_manifest(
+        if let Err(e) = write_project_manifest(
             Path::new(&record.target_dir),
             &template.id,
             &template.name,
             &template.description,
             record,
-        )?;
+        ) {
+            eprintln!("failed to write project manifest for run '{}': {e}", record.run_id);
+        }
         Ok(())
     }
 
