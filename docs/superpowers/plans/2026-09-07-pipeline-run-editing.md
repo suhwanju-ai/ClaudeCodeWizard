@@ -637,7 +637,7 @@ git commit -m "feat(engine): write run state and resolved template snapshot into
 
 **Interfaces:**
 - Consumes: `Stage`, `Template`, `validate_stage`, `TemplateValidationError` (Task 1); `RunRecord`, `RunStatus`, `StageStatus` w/ new variants (Task 2); `write_project_manifest`, `ProjectManifestError` (Task 3); `run_stage`, `ExecutorConfig` (unchanged, existing); `StageEvent` (unchanged, existing).
-- Produces: `Orchestrator::start_run(&self, template_id: &str, target_dir: PathBuf, run_id: String) -> Result<RunRecord, OrchestratorError>` (now **sync**, no `on_event` param — it no longer executes anything). `Orchestrator::start_stage<F: FnMut(&str, StageEvent)>(&self, run_id: &str, stage_override: Option<Stage>, on_event: F) -> Result<RunRecord, OrchestratorError>` (new — runs exactly the current, paused stage). `Orchestrator::approve_checkpoint(&self, run_id: &str) -> Result<RunRecord, OrchestratorError>` (now **sync**, no `on_event` param — it only advances state). `Orchestrator::request_changes` and `Orchestrator::reject_checkpoint` keep their existing signatures. `OrchestratorError` gains `NotAwaitingStageStart(String)`, `StageIdMismatch(String)`, `StageValidation(#[from] TemplateValidationError)`, `ProjectManifest(#[from] ProjectManifestError)`.
+- Produces: `Orchestrator::start_run(&self, template_id: &str, target_dir: PathBuf, run_id: String) -> Result<RunRecord, OrchestratorError>` (now **sync**, no `on_event` param — it no longer executes anything). `Orchestrator::start_stage<F: FnMut(&str, StageEvent)>(&self, run_id: &str, stage_override: Option<Stage>, on_event: F) -> Result<RunRecord, OrchestratorError>` (new — runs exactly the current, paused stage; this is now the *only* code path that actually spawns a stage process, so it must match on `run_stage`'s `Result` rather than using bare `?`, so a timed-out/failed `run_stage` call marks the record `Failed` and persists it instead of propagating a raw error and leaving the run stuck at `Running` — the same protection `approve_checkpoint`'s old `drive()` call and `request_changes` already had). `Orchestrator::approve_checkpoint(&self, run_id: &str) -> Result<RunRecord, OrchestratorError>` (now **sync**, no `on_event` param — it only advances state). `Orchestrator::request_changes` and `Orchestrator::reject_checkpoint` keep their existing signatures and existing timeout-safety behavior. `OrchestratorError` gains `NotAwaitingStageStart(String)`, `StageIdMismatch(String)`, `StageValidation(#[from] TemplateValidationError)`, `ProjectManifest(#[from] ProjectManifestError)`.
 
 - [ ] **Step 1: Create the new fixture**
 
@@ -797,7 +797,7 @@ fn setup() -> (Orchestrator, tempfile::TempDir, tempfile::TempDir, tempfile::Tem
     let orchestrator = Orchestrator::new(
         template_store,
         RunRecordStore::new(run_dir.path()),
-        ExecutorConfig { claude_binary: env!("CARGO_BIN_EXE_mock_claude").to_string() },
+        ExecutorConfig { claude_binary: env!("CARGO_BIN_EXE_mock_claude").to_string(), ..Default::default() },
     );
     (orchestrator, template_dir, run_dir, target_dir)
 }
@@ -934,6 +934,18 @@ async fn reject_checkpoint_cancels_run() {
 }
 
 #[tokio::test]
+async fn reject_checkpoint_rejects_a_run_not_awaiting_checkpoint() {
+    let (orchestrator, _t, _r, target_dir) = setup();
+    orchestrator.start_run("two-stage", target_dir.path().to_path_buf(), "run1".to_string()).unwrap();
+    orchestrator.start_stage("run1", None, |_, _| {}).await.unwrap();
+
+    orchestrator.reject_checkpoint("run1").unwrap();
+
+    let result = orchestrator.reject_checkpoint("run1");
+    assert!(matches!(result, Err(OrchestratorError::NotAwaitingCheckpoint(id)) if id == "run1"));
+}
+
+#[tokio::test]
 async fn start_stage_when_not_awaiting_stage_start_errors() {
     let (orchestrator, _t, _r, target_dir) = setup();
     orchestrator.start_run("two-stage", target_dir.path().to_path_buf(), "run1".to_string()).unwrap();
@@ -942,7 +954,98 @@ async fn start_stage_when_not_awaiting_stage_start_errors() {
     let result = orchestrator.start_stage("run1", None, |_, _| {}).await;
     assert!(matches!(result, Err(OrchestratorError::NotAwaitingStageStart(id)) if id == "run1"));
 }
+
+fn hanging_two_stage_template() -> Template {
+    Template {
+        id: "hang-two-stage".to_string(),
+        name: "Hang Two Stage".to_string(),
+        description: "desc".to_string(),
+        stages: vec![
+            Stage {
+                id: "stage1".to_string(),
+                name: "Stage 1".to_string(),
+                prompt: fixture_prompt("orchestrator_stage1.jsonl"),
+                permission_mode: PermissionMode::AcceptEdits,
+                allowed_tools: vec![],
+                checkpoint: true,
+            },
+            Stage {
+                id: "stage2".to_string(),
+                name: "Stage 2".to_string(),
+                prompt: fixture_prompt("executor_hang.jsonl"),
+                permission_mode: PermissionMode::AcceptEdits,
+                allowed_tools: vec![],
+                checkpoint: true,
+            },
+        ],
+    }
+}
+
+#[tokio::test]
+async fn start_stage_marks_run_failed_instead_of_stuck_running_on_timeout() {
+    let template_dir = tempfile::tempdir().unwrap();
+    let run_dir = tempfile::tempdir().unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let template_store = TemplateStore::new(template_dir.path());
+    template_store.save(&hanging_two_stage_template()).unwrap();
+    let orchestrator = Orchestrator::new(
+        template_store,
+        RunRecordStore::new(run_dir.path()),
+        ExecutorConfig {
+            claude_binary: env!("CARGO_BIN_EXE_mock_claude").to_string(),
+            stage_timeout: std::time::Duration::from_millis(100),
+            ..Default::default()
+        },
+    );
+
+    orchestrator.start_run("hang-two-stage", target_dir.path().to_path_buf(), "run1".to_string()).unwrap();
+    orchestrator.start_stage("run1", None, |_, _| {}).await.unwrap();
+    orchestrator.approve_checkpoint("run1").unwrap();
+
+    let result = orchestrator.start_stage("run1", None, |_, _| {}).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Failed);
+    assert_eq!(result.stages[1].status, StageStatus::Failed);
+
+    // The on-disk record must reflect the failure too, not be stuck at "running".
+    let persisted = RunRecordStore::new(run_dir.path()).load("run1").unwrap();
+    assert_eq!(persisted.status, RunStatus::Failed);
+    assert_eq!(persisted.stages[1].status, StageStatus::Failed);
+}
+
+#[tokio::test]
+async fn request_changes_marks_run_failed_instead_of_stuck_running_on_run_stage_timeout() {
+    let template_dir = tempfile::tempdir().unwrap();
+    let run_dir = tempfile::tempdir().unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let template_store = TemplateStore::new(template_dir.path());
+    template_store.save(&two_stage_template()).unwrap();
+    let orchestrator = Orchestrator::new(
+        template_store,
+        RunRecordStore::new(run_dir.path()),
+        ExecutorConfig {
+            claude_binary: env!("CARGO_BIN_EXE_mock_claude").to_string(),
+            stage_timeout: std::time::Duration::from_millis(100),
+            ..Default::default()
+        },
+    );
+
+    orchestrator.start_run("two-stage", target_dir.path().to_path_buf(), "run1".to_string()).unwrap();
+    orchestrator.start_stage("run1", None, |_, _| {}).await.unwrap();
+
+    let hang_feedback = fixture_prompt("executor_hang.jsonl");
+    let result = orchestrator.request_changes("run1", &hang_feedback, |_, _| {}).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Failed);
+    assert_eq!(result.stages[0].status, StageStatus::Failed);
+
+    let persisted = RunRecordStore::new(run_dir.path()).load("run1").unwrap();
+    assert_eq!(persisted.status, RunStatus::Failed);
+    assert_eq!(persisted.stages[0].status, StageStatus::Failed);
+}
 ```
+
+(`executor_hang.jsonl` — a `SLEEP:10000` fixture the `mock_claude` binary already understands — already exists from the base plan and is reused unchanged.)
 
 - [ ] **Step 3: Run tests to verify they fail**
 
@@ -1020,27 +1123,32 @@ Expected: FAIL — `todo!()` panics. Every method (including `reject_checkpoint`
         let mut latest_session_id = resume_session_id.clone();
         let mut collected_log = Vec::new();
 
-        let exit_code = run_stage(&self.executor_config, &stage, &target_dir, resume_session_id.as_deref(), |event| {
+        let result = run_stage(&self.executor_config, &stage, &target_dir, resume_session_id.as_deref(), |event| {
             if let StageEvent::Init { session_id } | StageEvent::Result { session_id, .. } = &event {
                 latest_session_id = Some(session_id.clone());
             }
             collected_log.push(serde_json::to_value(&event).unwrap_or(serde_json::Value::Null));
             on_event(&stage_id, event);
         })
-        .await?;
+        .await;
 
         record.stages[stage_index].log.extend(collected_log);
 
-        if exit_code != 0 {
-            record.mark_current_failed();
-        } else {
-            let session_id = latest_session_id.unwrap_or_default();
-            if stage.checkpoint {
-                record.mark_current_awaiting_checkpoint(session_id);
-            } else {
-                record.current_stage_mut().session_id = Some(session_id);
-                record.approve_current();
+        // `_` also catches a timed-out/IO-failed `run_stage` (an `Err`), not just a
+        // non-zero exit code — mirrors `request_changes`'s existing timeout handling
+        // below, so a hung stage is marked `Failed` and persisted instead of the
+        // error propagating raw and leaving the record stuck at `Running`.
+        match result {
+            Ok(0) => {
+                let session_id = latest_session_id.unwrap_or_default();
+                if stage.checkpoint {
+                    record.mark_current_awaiting_checkpoint(session_id);
+                } else {
+                    record.current_stage_mut().session_id = Some(session_id);
+                    record.approve_current();
+                }
             }
+            _ => record.mark_current_failed(),
         }
 
         self.save(&template, &record)?;
@@ -1126,7 +1234,7 @@ Also update `reject_checkpoint` to use the new `save` helper (replace its `self.
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `cd src-tauri && cargo test --test orchestrator_test`
-Expected: PASS (9 tests).
+Expected: PASS (12 tests: the 9 from Step 2's core list, plus `reject_checkpoint_rejects_a_run_not_awaiting_checkpoint` and the two timeout tests, all now driven through `start_stage` instead of the old `drive()` loop).
 
 Run the full backend suite to confirm nothing else regressed: `cd src-tauri && cargo test`
 Expected: PASS (all unit + integration tests across `template::`, `engine::`, `cli_check`, `executor_test`, `orchestrator_test`).

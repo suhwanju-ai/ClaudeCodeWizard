@@ -50,6 +50,16 @@ pub(crate) fn is_valid_id(id: &str) -> bool {
         && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
+pub fn validate_stage(stage: &Stage) -> Result<(), TemplateValidationError> {
+    if !is_valid_id(&stage.id) {
+        return Err(TemplateValidationError::InvalidId(stage.id.clone()));
+    }
+    if stage.prompt.trim().is_empty() {
+        return Err(TemplateValidationError::EmptyPrompt(stage.id.clone()));
+    }
+    Ok(())
+}
+
 pub fn validate_template(template: &Template) -> Result<(), TemplateValidationError> {
     if !is_valid_id(&template.id) {
         return Err(TemplateValidationError::InvalidId(template.id.clone()));
@@ -59,12 +69,7 @@ pub fn validate_template(template: &Template) -> Result<(), TemplateValidationEr
     }
     let mut seen = std::collections::HashSet::new();
     for stage in &template.stages {
-        if !is_valid_id(&stage.id) {
-            return Err(TemplateValidationError::InvalidId(stage.id.clone()));
-        }
-        if stage.prompt.trim().is_empty() {
-            return Err(TemplateValidationError::EmptyPrompt(stage.id.clone()));
-        }
+        validate_stage(stage)?;
         if !seen.insert(stage.id.clone()) {
             return Err(TemplateValidationError::DuplicateStageId(stage.id.clone()));
         }
@@ -151,6 +156,24 @@ mod tests {
     fn rejects_stage_id_with_path_separator() {
         let t = template(vec![stage("../bad", "do it")]);
         assert_eq!(validate_template(&t), Err(TemplateValidationError::InvalidId("../bad".to_string())));
+    }
+
+    #[test]
+    fn validate_stage_rejects_empty_prompt() {
+        let s = stage("s1", "   ");
+        assert_eq!(validate_stage(&s), Err(TemplateValidationError::EmptyPrompt("s1".to_string())));
+    }
+
+    #[test]
+    fn validate_stage_rejects_invalid_id() {
+        let s = stage("../bad", "do it");
+        assert_eq!(validate_stage(&s), Err(TemplateValidationError::InvalidId("../bad".to_string())));
+    }
+
+    #[test]
+    fn validate_stage_accepts_valid_stage() {
+        let s = stage("s1", "do it");
+        assert_eq!(validate_stage(&s), Ok(()));
     }
 
     #[test]
