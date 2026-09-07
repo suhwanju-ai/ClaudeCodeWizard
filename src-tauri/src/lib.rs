@@ -32,6 +32,7 @@ pub fn run() {
             commands::delete_template,
             commands::check_cli,
             commands::start_pipeline_run,
+            commands::start_stage,
             commands::approve_checkpoint,
             commands::request_changes,
             commands::reject_checkpoint,

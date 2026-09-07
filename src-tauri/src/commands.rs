@@ -5,7 +5,7 @@ use crate::cli_check::{check_claude_cli, CliCheckResult};
 use crate::engine::orchestrator::Orchestrator;
 use crate::engine::run_record::RunRecord;
 use crate::engine::stream_json::StageEvent;
-use crate::template::Template;
+use crate::template::{Stage, Template};
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -51,15 +51,24 @@ pub fn check_cli(orchestrator: State<Orchestrator>) -> String {
 }
 
 #[tauri::command]
-pub async fn start_pipeline_run(
-    app: AppHandle,
-    orchestrator: State<'_, Orchestrator>,
+pub fn start_pipeline_run(
+    orchestrator: State<Orchestrator>,
     template_id: String,
     target_dir: String,
     run_id: String,
 ) -> Result<RunRecord, String> {
+    orchestrator.start_run(&template_id, target_dir.into(), run_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn start_stage(
+    app: AppHandle,
+    orchestrator: State<'_, Orchestrator>,
+    run_id: String,
+    stage_override: Option<Stage>,
+) -> Result<RunRecord, String> {
     orchestrator
-        .start_run(&template_id, target_dir.into(), run_id.clone(), |stage_id, event| {
+        .start_stage(&run_id, stage_override, |stage_id, event| {
             emit_stage_event(&app, &run_id, stage_id, event);
         })
         .await
@@ -67,17 +76,8 @@ pub async fn start_pipeline_run(
 }
 
 #[tauri::command]
-pub async fn approve_checkpoint(
-    app: AppHandle,
-    orchestrator: State<'_, Orchestrator>,
-    run_id: String,
-) -> Result<RunRecord, String> {
-    orchestrator
-        .approve_checkpoint(&run_id, |stage_id, event| {
-            emit_stage_event(&app, &run_id, stage_id, event);
-        })
-        .await
-        .map_err(|e| e.to_string())
+pub fn approve_checkpoint(orchestrator: State<Orchestrator>, run_id: String) -> Result<RunRecord, String> {
+    orchestrator.approve_checkpoint(&run_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
