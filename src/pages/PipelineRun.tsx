@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { approveCheckpoint, onStageEvent, rejectCheckpoint, requestChanges, startStage } from "../api";
 import type { RunRecord, Stage, StageEventPayload, StageStatus, Template } from "../types";
 import StageFields from "../components/StageFields";
@@ -11,6 +11,7 @@ interface Props {
 }
 
 interface LogLine {
+  id: number;
   kind: string;
   text: string;
 }
@@ -25,7 +26,7 @@ function formatToolInput(input: unknown): string {
   return JSON.stringify(input);
 }
 
-function describeEvent(payload: StageEventPayload): LogLine | null {
+function describeEvent(payload: StageEventPayload): Omit<LogLine, "id"> | null {
   const e = payload.event;
   switch (e.kind) {
     case "init":
@@ -77,17 +78,101 @@ function statusBadgeClass(status: RunRecord["status"]): string {
   return "badge";
 }
 
+interface PreStagePanelProps {
+  stage: Stage;
+  onChange: (patch: Partial<Stage>) => void;
+  onStart: () => void;
+  busy: boolean;
+}
+
+function PreStagePanel({ stage, onChange, onStart, busy }: PreStagePanelProps) {
+  return (
+    <div className="card">
+      <div className="section-label">다음 단계 — 실행 전 확인/수정</div>
+      <StageFields stage={stage} onChange={onChange} idPrefix="pending-stage" promptLabel="프롬프트" lockId />
+      <div style={{ display: "flex", marginTop: 12 }}>
+        <button className="btn btn-success" onClick={onStart} disabled={busy}>
+          이 단계 실행
+        </button>
+      </div>
+    </div>
+  );
+}
+
+interface CheckpointPanelProps {
+  changedFiles: string[];
+  feedback: string;
+  onFeedbackChange: (value: string) => void;
+  onApprove: () => void;
+  onRequestChanges: () => void;
+  onReject: () => void;
+  busy: boolean;
+}
+
+function CheckpointPanel({
+  changedFiles,
+  feedback,
+  onFeedbackChange,
+  onApprove,
+  onRequestChanges,
+  onReject,
+  busy,
+}: CheckpointPanelProps) {
+  return (
+    <div className="card">
+      <div className="section-label">체크포인트 — 계속 진행할까요?</div>
+
+      {changedFiles.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "10px 0" }}>
+          {changedFiles.map((path) => (
+            <span key={path} className="badge mono">
+              {path}
+            </span>
+          ))}
+        </div>
+      )}
+
+      <div className="field" style={{ margin: "12px 0" }}>
+        <label htmlFor="feedback">수정 요청 내용</label>
+        <textarea
+          id="feedback"
+          className="textarea"
+          rows={3}
+          value={feedback}
+          onChange={(e) => onFeedbackChange(e.target.value)}
+        />
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <button className="btn btn-success" onClick={onApprove} disabled={busy}>
+          승인
+        </button>
+        <button className="btn btn-outline" onClick={onRequestChanges} disabled={busy}>
+          수정 요청 보내기
+        </button>
+        <span style={{ flex: 1 }} />
+        <button className="btn btn-danger-outline" onClick={onReject} disabled={busy}>
+          거부
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function PipelineRun({ initialRun, template, onFinished, onEditTemplate }: Props) {
   const [run, setRun] = useState<RunRecord>(initialRun);
   const stageNameById = new Map(template.stages.map((s) => [s.id, s.name]));
   const [log, setLog] = useState<LogLine[]>([]);
+  const logIdCounter = useRef(0);
   const [changedFiles, setChangedFiles] = useState<string[]>([]);
   const [feedback, setFeedback] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Relies on the backend invariant that a run in "awaiting-stage-start" always
-  // has a valid current stage at run.resolvedStages[run.currentStageIndex].
-  const [stageDraft, setStageDraft] = useState<Stage>(run.resolvedStages[run.currentStageIndex]);
+  // has a valid current stage at run.resolvedStages[run.currentStageIndex] --
+  // guarded as optional below so a violated invariant hides the panel instead
+  // of crashing the render.
+  const [stageDraft, setStageDraft] = useState<Stage | undefined>(run.resolvedStages[run.currentStageIndex]);
 
   useEffect(() => {
     setRun(initialRun);
@@ -107,7 +192,7 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
     const unlistenPromise = onStageEvent((payload) => {
       if (payload.runId !== run.runId) return;
       const described = describeEvent(payload);
-      if (described) setLog((prev) => [...prev, described]);
+      if (described) setLog((prev) => [...prev, { id: logIdCounter.current++, ...described }]);
 
       if (payload.event.kind === "toolUse" && (payload.event.name === "Write" || payload.event.name === "Edit")) {
         const input = payload.event.input as Record<string, unknown> | undefined;
@@ -121,6 +206,7 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
   }, [run.runId]);
 
   const handleStartStage = async () => {
+    if (!stageDraft) return;
     setError(null);
     setBusy(true);
     const preCallRun = run;
@@ -224,70 +310,33 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
 
         <div className="card" style={{ marginBottom: 16, minHeight: 120 }}>
           {log.length === 0 && <p className="help-text">아직 로그가 없습니다.</p>}
-          {log.map((line, i) => (
-            <div key={i} className="log-line">
+          {log.map((line) => (
+            <div key={line.id} className="log-line">
               <span className={`log-line__label ${logLabelClass(line.kind)}`}>{line.kind}</span>
               <span className="log-line__body">{line.text}</span>
             </div>
           ))}
         </div>
 
-        {run.status === "awaiting-stage-start" && (
-          <div className="card">
-            <div className="section-label">다음 단계 — 실행 전 확인/수정</div>
-            <StageFields
-              stage={stageDraft}
-              onChange={(patch) => setStageDraft((prev) => ({ ...prev, ...patch }))}
-              idPrefix="pending-stage"
-              promptLabel="프롬프트"
-              lockId
-            />
-            <div style={{ display: "flex", marginTop: 12 }}>
-              <button className="btn btn-success" onClick={handleStartStage} disabled={busy}>
-                이 단계 실행
-              </button>
-            </div>
-          </div>
+        {run.status === "awaiting-stage-start" && stageDraft && (
+          <PreStagePanel
+            stage={stageDraft}
+            onChange={(patch) => setStageDraft((prev) => (prev ? { ...prev, ...patch } : prev))}
+            onStart={handleStartStage}
+            busy={busy}
+          />
         )}
 
         {run.status === "awaiting-checkpoint" && (
-          <div className="card">
-            <div className="section-label">체크포인트 — 계속 진행할까요?</div>
-
-            {changedFiles.length > 0 && (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "10px 0" }}>
-                {changedFiles.map((path) => (
-                  <span key={path} className="badge mono">
-                    {path}
-                  </span>
-                ))}
-              </div>
-            )}
-
-            <div className="field" style={{ margin: "12px 0" }}>
-              <label htmlFor="feedback">수정 요청 내용</label>
-              <textarea
-                id="feedback"
-                className="textarea"
-                rows={3}
-                value={feedback}
-                onChange={(e) => setFeedback(e.target.value)}
-              />
-            </div>
-
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <button className="btn btn-success" onClick={handleApprove} disabled={busy}>
-                승인
-              </button>
-              <button className="btn btn-outline" onClick={handleRequestChanges} disabled={busy}>
-                수정 요청 보내기
-              </button>
-              <span style={{ flex: 1 }} />
-              <button className="btn btn-danger-outline" onClick={handleReject} disabled={busy}>
-                거부
-              </button>
-            </div>
-          </div>
+          <CheckpointPanel
+            changedFiles={changedFiles}
+            feedback={feedback}
+            onFeedbackChange={setFeedback}
+            onApprove={handleApprove}
+            onRequestChanges={handleRequestChanges}
+            onReject={handleReject}
+            busy={busy}
+          />
         )}
 
         <div style={{ marginTop: 18, display: "flex", gap: 8 }}>

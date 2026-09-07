@@ -245,4 +245,10 @@ describe("PipelineRun", () => {
     fireEvent.click(screen.getByRole("button", { name: "이 단계 실행" }));
     await waitFor(() => expect(onFinished).toHaveBeenCalled());
   });
+
+  it("hides the pre-stage panel instead of crashing when resolvedStages doesn't cover the current stage", () => {
+    const brokenRun: RunRecord = { ...pendingRun, resolvedStages: [] };
+    render(<PipelineRun initialRun={brokenRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "이 단계 실행" })).not.toBeInTheDocument();
+  });
 });
