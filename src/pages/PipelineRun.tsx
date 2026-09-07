@@ -58,12 +58,19 @@ function logLabelClass(kind: string): string {
 function stageDotClass(status: StageStatus): string {
   if (status === "approved") return "stage-timeline__dot--approved";
   if (status === "awaiting-checkpoint") return "stage-timeline__dot--awaiting";
+  // "awaiting-start" is also a paused-for-user-action state (pre-stage edit
+  // gate), so it shares styling with "awaiting-checkpoint" rather than
+  // looking like an untouched "pending" stage.
+  if (status === "awaiting-start") return "stage-timeline__dot--awaiting";
   if (status === "failed") return "stage-timeline__dot--failed";
   return "";
 }
 
 function statusBadgeClass(status: RunRecord["status"]): string {
   if (status === "awaiting-checkpoint") return "badge badge-warning";
+  // "awaiting-stage-start" is also a paused-for-user-action state, so it
+  // shares styling with "awaiting-checkpoint" rather than the generic default.
+  if (status === "awaiting-stage-start") return "badge badge-warning";
   if (status === "completed") return "badge badge-success";
   if (status === "failed") return "badge badge-danger";
   if (status === "cancelled") return "badge badge-muted";
@@ -78,6 +85,8 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
   const [feedback, setFeedback] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Relies on the backend invariant that a run in "awaiting-stage-start" always
+  // has a valid current stage at run.resolvedStages[run.currentStageIndex].
   const [stageDraft, setStageDraft] = useState<Stage>(run.resolvedStages[run.currentStageIndex]);
 
   useEffect(() => {
@@ -114,11 +123,22 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
   const handleStartStage = async () => {
     setError(null);
     setBusy(true);
+    const preCallRun = run;
+    // Optimistically reflect that the stage is now running, so the badge and
+    // pre-stage panel (gated on run.status === "awaiting-stage-start") stop
+    // showing the stale "paused, ready to edit" state while it executes.
+    setRun((prev) => ({ ...prev, status: "running" }));
     try {
       const updated = await startStage(run.runId, stageDraft);
       setRun(updated);
+      if (updated.status === "completed" || updated.status === "cancelled" || updated.status === "failed") {
+        onFinished();
+      }
     } catch (e) {
       setError(String(e));
+      // Restore the pre-call state so the pre-stage panel comes back instead
+      // of leaving the UI stuck showing a phantom "running" state.
+      setRun(preCallRun);
     } finally {
       setBusy(false);
     }
@@ -130,7 +150,10 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
     try {
       const updated = await approveCheckpoint(run.runId);
       setRun(updated);
-      if (updated.status === "completed" || updated.status === "cancelled" || updated.status === "failed") {
+      // `approve_checkpoint` only ever produces `AwaitingStageStart` or
+      // `Completed` -- it no longer executes anything, so it can't fail or
+      // need cancelling.
+      if (updated.status === "completed") {
         onFinished();
       }
     } catch (e) {

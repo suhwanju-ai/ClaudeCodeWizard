@@ -209,4 +209,40 @@ describe("PipelineRun", () => {
     render(<PipelineRun initialRun={pendingRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />);
     expect(screen.queryByRole("button", { name: "승인" })).not.toBeInTheDocument();
   });
+
+  it("optimistically shows a running status and hides the pre-stage panel while the stage starts", async () => {
+    let resolveStart: (value: RunRecord) => void = () => {};
+    vi.mocked(startStage).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveStart = resolve;
+        })
+    );
+    render(<PipelineRun initialRun={pendingRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "이 단계 실행" }));
+
+    await waitFor(() => expect(screen.getByText(/상태: running/)).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "이 단계 실행" })).not.toBeInTheDocument();
+
+    resolveStart({ ...pendingRun, status: "awaiting-checkpoint" });
+    await waitFor(() => expect(screen.getByText(/상태: awaiting-checkpoint/)).toBeInTheDocument());
+  });
+
+  it("restores the pre-stage panel when startStage fails, instead of leaving a phantom running state", async () => {
+    vi.mocked(startStage).mockRejectedValue(new Error("claude CLI not found"));
+    render(<PipelineRun initialRun={pendingRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "이 단계 실행" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("claude CLI not found");
+    expect(screen.getByRole("button", { name: "이 단계 실행" })).toBeInTheDocument();
+    expect(screen.getByText(/상태: awaiting-stage-start/)).toBeInTheDocument();
+  });
+
+  it("calls onFinished when starting the stage lands on a terminal status", async () => {
+    const onFinished = vi.fn();
+    vi.mocked(startStage).mockResolvedValue({ ...pendingRun, status: "completed" });
+    render(<PipelineRun initialRun={pendingRun} template={sampleTemplate} onFinished={onFinished} onEditTemplate={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "이 단계 실행" }));
+    await waitFor(() => expect(onFinished).toHaveBeenCalled());
+  });
 });
