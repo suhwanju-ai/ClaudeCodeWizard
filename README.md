@@ -9,17 +9,24 @@ CLI — pausing at per-stage checkpoints for human approval before continuing.
 ## How it works
 
 1. Pick a template from the gallery and choose (or create) an empty target folder.
-2. Each stage runs as its own `claude --print --output-format stream-json` invocation,
+2. Every stage pauses *before* it runs so you can review or edit its prompt,
+   permission mode, allowed tools, or checkpoint toggle for this run only —
+   click **이 단계 실행** to run it as shown (or as edited).
+3. Each stage runs as its own `claude --print --output-format stream-json` invocation,
    with `--resume <session_id>` chaining conversation context from one stage to the next
    so later stages know what earlier stages built.
-3. When a stage finishes, the run pauses (if the stage has a checkpoint) and shows a
-   live log plus **Approve / Request changes / Reject** controls.
-4. Approving the last stage's checkpoint completes the run.
+4. When a stage finishes, if it's marked as a checkpoint, the run pauses again and shows a
+   live log plus **Approve / Request changes / Reject** controls before moving on to the
+   next stage's pre-run edit pause.
+5. Approving the last stage's checkpoint (or a non-checkpoint last stage finishing) completes the run.
 
 Templates, run records, and the two seed templates ("웹 프로그램 개발" and
 "데스크톱 프로그램 개발 (Tauri)") are all plain JSON files — there's no embedded
-database and no bundled AI SDK; the app is a thin, persistent orchestration layer
-around the `claude` CLI you already have installed.
+database and no bundled AI SDK. Run state and the resolved (per-run-edited)
+stage definitions are written to both the app's own data directory and to
+`.claude-pipeline-wizard/{run.json,pipeline.json}` inside the run's target
+project folder, so a run is inspectable — and its `pipeline.json` hand-editable
+— from the project folder itself.
 
 ## Requirements
 
@@ -62,17 +69,20 @@ src/                      React frontend
   pages/
     TemplateGallery.tsx   Browse, run, edit, delete templates
     TemplateEditor.tsx    Form-based stage editor (add/remove/reorder, validation)
-    PipelineRun.tsx       Live stage log + checkpoint approval panel
+    PipelineRun.tsx       Pre-stage edit panel, live stage log, checkpoint approval panel
+  components/
+    StageFields.tsx       Shared prompt/permission/tools/checkpoint fields (editor + run view)
   api.ts                  Tauri invoke()/listen() wrappers
   types.ts                TypeScript mirrors of the Rust IPC types
 
 src-tauri/src/
   template/               Template/Stage types, file-backed CRUD store, seed templates
   engine/
-    run_record.rs         Run state machine (RunRecord/StageRun, checkpoint transitions)
+    run_record.rs         Run state machine (RunRecord/StageRun, pre-stage-start + checkpoint transitions)
+    project_manifest.rs   Writes run.json/pipeline.json into the target project folder
     stream_json.rs        Parser for the claude CLI's stream-json output
-    executor.rs           Spawns the claude CLI per stage, streams events, enforces a timeout
-    orchestrator.rs        Drives the checkpoint state machine end to end
+    executor.rs            Spawns the claude CLI per stage, streams events, enforces a timeout
+    orchestrator.rs        Drives the pre-stage-start + checkpoint state machine end to end
   commands.rs             Tauri commands exposed to the frontend
   bin/mock_claude.rs      Test-only stand-in for the claude CLI (used by the Rust test suite)
 
@@ -86,6 +96,11 @@ docs/superpowers/
 - **New folders only** — a template runs against a folder you pick, which must
   not already have a pipeline run in it. Running against an existing codebase
   isn't supported yet.
+- **Project-local manifest eases inspection, not resume** — `.claude-pipeline-wizard/run.json`
+  and `pipeline.json` inside the target folder make a paused/failed run's state and
+  actually-executing stage definitions inspectable (and `pipeline.json` hand-editable)
+  without digging through the app's data directory, but there is still no in-app command
+  or screen to reattach to an existing run after an app restart (see the point below).
 - **No cross-restart resume UI** — run state is persisted to disk per
   transition, but there's currently no command or screen to reattach to an
   existing run after the app restarts; recovery today means inspecting the
