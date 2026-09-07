@@ -25,8 +25,13 @@ Templates, run records, and the two seed templates ("웹 프로그램 개발" an
 database and no bundled AI SDK. Run state and the resolved (per-run-edited)
 stage definitions are written to both the app's own data directory and to
 `.claude-pipeline-wizard/{run.json,pipeline.json}` inside the run's target
-project folder, so a run is inspectable — and its `pipeline.json` hand-editable
-— from the project folder itself.
+project folder, so a run is inspectable from the project folder itself —
+these files are read-only from the app's perspective (nothing reads them
+back in), so hand-editing `pipeline.json` has no effect on the run. Note
+that `.claude-pipeline-wizard/` lives inside your target project folder but
+is not automatically added to that project's own `.gitignore` — the app
+has no control over your project's VCS config, so add it yourself if you
+don't want it tracked.
 
 ## Requirements
 
@@ -81,8 +86,8 @@ src-tauri/src/
     run_record.rs         Run state machine (RunRecord/StageRun, pre-stage-start + checkpoint transitions)
     project_manifest.rs   Writes run.json/pipeline.json into the target project folder
     stream_json.rs        Parser for the claude CLI's stream-json output
-    executor.rs            Spawns the claude CLI per stage, streams events, enforces a timeout
-    orchestrator.rs        Drives the pre-stage-start + checkpoint state machine end to end
+    executor.rs           Spawns the claude CLI per stage, streams events, enforces a timeout
+    orchestrator.rs       Drives the pre-stage-start + checkpoint state machine end to end
   commands.rs             Tauri commands exposed to the frontend
   bin/mock_claude.rs      Test-only stand-in for the claude CLI (used by the Rust test suite)
 
@@ -98,9 +103,9 @@ docs/superpowers/
   isn't supported yet.
 - **Project-local manifest eases inspection, not resume** — `.claude-pipeline-wizard/run.json`
   and `pipeline.json` inside the target folder make a paused/failed run's state and
-  actually-executing stage definitions inspectable (and `pipeline.json` hand-editable)
-  without digging through the app's data directory, but there is still no in-app command
-  or screen to reattach to an existing run after an app restart (see the point below).
+  actually-executing stage definitions inspectable without digging through the app's
+  data directory, but there is still no in-app command or screen to reattach to an
+  existing run after an app restart (see the point below).
 - **No cross-restart resume UI** — run state is persisted to disk per
   transition, but there's currently no command or screen to reattach to an
   existing run after the app restarts; recovery today means inspecting the
