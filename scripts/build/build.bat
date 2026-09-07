@@ -4,6 +4,13 @@ setlocal enabledelayedexpansion
 title Claude Pipeline Wizard - Build
 color 0A
 
+:: Always run from the repo root, regardless of the caller's cwd (e.g.
+:: double-clicking this file from Explorer sets cwd to scripts\build\, which
+:: silently breaks every relative path below -- npm/npx tools walk up to find
+:: package.json/tsconfig.json so steps 1-3 mask the problem, but `cargo
+:: --manifest-path` does not, so it's the first hard failure).
+cd /d "%~dp0..\.."
+
 echo.
 echo  =============================================
 echo   Claude Pipeline Wizard - Release Build

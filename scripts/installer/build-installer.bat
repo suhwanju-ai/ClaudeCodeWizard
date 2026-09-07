@@ -4,6 +4,10 @@ setlocal enabledelayedexpansion
 title Claude Pipeline Wizard - Windows Installer Build
 color 0E
 
+:: Always run from the repo root, regardless of the caller's cwd (e.g.
+:: double-clicking this file from Explorer sets cwd to scripts\installer\).
+cd /d "%~dp0..\.."
+
 echo.
 echo  =================================================
 echo   Claude Pipeline Wizard - Windows Installer Build

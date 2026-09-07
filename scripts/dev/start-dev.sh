@@ -7,6 +7,9 @@
 set -e
 trap 'echo -e "${RED}❌ 오류 발생! 라인 $LINENO${NC}"; exit 1' ERR
 
+# 항상 저장소 루트에서 실행 (호출 시점 cwd가 어디든 무관하게)
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.."
+
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; BLUE='\033[0;34m'; NC='\033[0m'
 
 echo -e "${BLUE}🦀 Claude Pipeline Wizard Tauri 개발 서버 시작...${NC}"

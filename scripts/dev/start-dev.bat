@@ -4,6 +4,10 @@ setlocal enabledelayedexpansion
 title Claude Pipeline Wizard - Dev Server
 color 0A
 
+:: Always run from the repo root, regardless of the caller's cwd (e.g.
+:: double-clicking this file from Explorer sets cwd to scripts\dev\).
+cd /d "%~dp0..\.."
+
 echo.
 echo  =============================================
 echo   Claude Pipeline Wizard - Tauri Dev Server
