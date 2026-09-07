@@ -38,8 +38,16 @@ pub fn parse_line(line: &str) -> Result<StageEvent, ParseWarning> {
     let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match event_type {
         "system" => {
-            let session_id = value.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            Ok(StageEvent::Init { session_id })
+            let subtype = value.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+            if subtype == "init" {
+                let session_id = value.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                Ok(StageEvent::Init { session_id })
+            } else {
+                // Real sessions with SessionStart hooks configured emit several
+                // "type":"system" lines (hook_started/hook_response/...) before
+                // the one true init event; only that one should surface as Init.
+                Ok(StageEvent::Unknown { raw: value })
+            }
         }
         "assistant" => {
             let text = value
@@ -81,8 +89,20 @@ mod tests {
 
     #[test]
     fn parses_system_init_event() {
-        let line = r#"{"type":"system","session_id":"sess-1"}"#;
+        let line = r#"{"type":"system","subtype":"init","session_id":"sess-1"}"#;
         assert_eq!(parse_line(line).unwrap(), StageEvent::Init { session_id: "sess-1".to_string() });
+    }
+
+    #[test]
+    fn non_init_system_events_become_unknown_not_init() {
+        // A real CLI session with SessionStart hooks configured emits many
+        // "type":"system" lines (hook_started/hook_response/hook_progress/...)
+        // before the one true init event. Only subtype:"init" is the init
+        // event — anything else must not be misparsed as Init, or the live
+        // log would show a spurious "세션 시작" line per hook event.
+        let line = r#"{"type":"system","subtype":"hook_started","session_id":"sess-1","hook_name":"SessionStart:startup"}"#;
+        let event = parse_line(line).unwrap();
+        assert!(matches!(event, StageEvent::Unknown { .. }));
     }
 
     #[test]
