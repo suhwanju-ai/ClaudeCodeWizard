@@ -67,6 +67,7 @@ describe("App routing", () => {
       status: "awaiting-checkpoint",
       currentStageIndex: 0,
       stages: [{ id: "s1", status: "awaiting-checkpoint", sessionId: "sess1", log: [] }],
+      resolvedStages: sample.stages,
     };
     let resolveStart: (value: RunRecord) => void = () => {};
     vi.mocked(startPipelineRun).mockImplementation(
@@ -88,7 +89,7 @@ describe("App routing", () => {
 
     // the run view mounts with a pending record before startPipelineRun resolves,
     // so the stage-event listener is live for the entire first stage
-    expect(await screen.findByText("상태: running")).toBeInTheDocument();
+    expect(await screen.findByText("상태: awaiting-stage-start")).toBeInTheDocument();
 
     resolveStart(runRecord);
     expect(await screen.findByText("상태: awaiting-checkpoint")).toBeInTheDocument();

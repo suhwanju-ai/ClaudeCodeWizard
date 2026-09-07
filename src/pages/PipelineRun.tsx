@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { approveCheckpoint, onStageEvent, rejectCheckpoint, requestChanges } from "../api";
-import type { RunRecord, StageEventPayload, StageStatus, Template } from "../types";
+import { approveCheckpoint, onStageEvent, rejectCheckpoint, requestChanges, startStage } from "../api";
+import type { RunRecord, Stage, StageEventPayload, StageStatus, Template } from "../types";
+import StageFields from "../components/StageFields";
 
 interface Props {
   initialRun: RunRecord;
@@ -77,6 +78,7 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
   const [feedback, setFeedback] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [stageDraft, setStageDraft] = useState<Stage>(run.resolvedStages[run.currentStageIndex]);
 
   useEffect(() => {
     setRun(initialRun);
@@ -85,6 +87,12 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
   useEffect(() => {
     setChangedFiles([]);
   }, [run.currentStageIndex]);
+
+  useEffect(() => {
+    if (run.status === "awaiting-stage-start") {
+      setStageDraft(run.resolvedStages[run.currentStageIndex]);
+    }
+  }, [run.status, run.currentStageIndex, run.resolvedStages]);
 
   useEffect(() => {
     const unlistenPromise = onStageEvent((payload) => {
@@ -102,6 +110,19 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
       unlistenPromise.then((unlisten) => unlisten());
     };
   }, [run.runId]);
+
+  const handleStartStage = async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      const updated = await startStage(run.runId, stageDraft);
+      setRun(updated);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handleApprove = async () => {
     setError(null);
@@ -187,6 +208,24 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
             </div>
           ))}
         </div>
+
+        {run.status === "awaiting-stage-start" && (
+          <div className="card">
+            <div className="section-label">다음 단계 — 실행 전 확인/수정</div>
+            <StageFields
+              stage={stageDraft}
+              onChange={(patch) => setStageDraft((prev) => ({ ...prev, ...patch }))}
+              idPrefix="pending-stage"
+              promptLabel="프롬프트"
+              lockId
+            />
+            <div style={{ display: "flex", marginTop: 12 }}>
+              <button className="btn btn-success" onClick={handleStartStage} disabled={busy}>
+                이 단계 실행
+              </button>
+            </div>
+          </div>
+        )}
 
         {run.status === "awaiting-checkpoint" && (
           <div className="card">

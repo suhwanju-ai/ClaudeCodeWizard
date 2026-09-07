@@ -6,9 +6,10 @@ vi.mock("../api", () => ({
   approveCheckpoint: vi.fn(),
   requestChanges: vi.fn(),
   rejectCheckpoint: vi.fn(),
+  startStage: vi.fn(),
 }));
 
-import { onStageEvent, approveCheckpoint, requestChanges, rejectCheckpoint } from "../api";
+import { onStageEvent, approveCheckpoint, requestChanges, rejectCheckpoint, startStage } from "../api";
 import PipelineRun from "./PipelineRun";
 import type { RunRecord, StageEventPayload, Template } from "../types";
 
@@ -20,6 +21,19 @@ const runningRun: RunRecord = {
   currentStageIndex: 0,
   stages: [
     { id: "s1", status: "awaiting-checkpoint", sessionId: "sess1", log: [] },
+    { id: "s2", status: "pending", sessionId: null, log: [] },
+  ],
+  resolvedStages: [
+    { id: "s1", name: "요구사항 정리", prompt: "p1", permissionMode: "acceptEdits", allowedTools: [], checkpoint: true },
+    { id: "s2", name: "구현", prompt: "p2", permissionMode: "acceptEdits", allowedTools: [], checkpoint: true },
+  ],
+};
+
+const pendingRun: RunRecord = {
+  ...runningRun,
+  status: "awaiting-stage-start",
+  stages: [
+    { id: "s1", status: "awaiting-start", sessionId: null, log: [] },
     { id: "s2", status: "pending", sessionId: null, log: [] },
   ],
 };
@@ -40,6 +54,7 @@ beforeEach(() => {
   vi.mocked(approveCheckpoint).mockReset();
   vi.mocked(requestChanges).mockReset();
   vi.mocked(rejectCheckpoint).mockReset();
+  vi.mocked(startStage).mockReset();
 });
 
 describe("PipelineRun", () => {
@@ -156,5 +171,42 @@ describe("PipelineRun", () => {
     render(<PipelineRun initialRun={failedRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={onEditTemplate} />);
     fireEvent.click(screen.getByRole("button", { name: "템플릿 편집" }));
     expect(onEditTemplate).toHaveBeenCalledWith(sampleTemplate);
+  });
+
+  it("shows the pre-stage edit panel prefilled with the current stage's prompt when awaiting stage start", () => {
+    render(<PipelineRun initialRun={pendingRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "이 단계 실행" })).toBeInTheDocument();
+    expect(screen.getByLabelText("프롬프트")).toHaveValue("p1");
+  });
+
+  it("sends the edited stage via startStage when running the stage", async () => {
+    vi.mocked(startStage).mockResolvedValue({ ...pendingRun, status: "awaiting-checkpoint" });
+    render(<PipelineRun initialRun={pendingRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("프롬프트"), { target: { value: "수정된 프롬프트" } });
+    fireEvent.click(screen.getByRole("button", { name: "이 단계 실행" }));
+    await waitFor(() =>
+      expect(startStage).toHaveBeenCalledWith("run1", expect.objectContaining({ id: "s1", prompt: "수정된 프롬프트" }))
+    );
+  });
+
+  it("runs the stage unedited when the user clicks run without changing anything", async () => {
+    vi.mocked(startStage).mockResolvedValue({ ...pendingRun, status: "awaiting-checkpoint" });
+    render(<PipelineRun initialRun={pendingRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "이 단계 실행" }));
+    await waitFor(() =>
+      expect(startStage).toHaveBeenCalledWith("run1", expect.objectContaining({ id: "s1", prompt: "p1" }))
+    );
+  });
+
+  it("shows an error when startStage rejects", async () => {
+    vi.mocked(startStage).mockRejectedValue(new Error("claude CLI not found"));
+    render(<PipelineRun initialRun={pendingRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "이 단계 실행" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("claude CLI not found");
+  });
+
+  it("does not show the checkpoint approval panel while awaiting stage start", () => {
+    render(<PipelineRun initialRun={pendingRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "승인" })).not.toBeInTheDocument();
   });
 });

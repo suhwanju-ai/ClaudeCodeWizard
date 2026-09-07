@@ -70,9 +70,15 @@ export default function App() {
         runId,
         templateId: template.id,
         targetDir,
-        status: "running",
+        status: "awaiting-stage-start",
         currentStageIndex: 0,
-        stages: template.stages.map((s) => ({ id: s.id, status: "pending", sessionId: null, log: [] })),
+        stages: template.stages.map((s, i) => ({
+          id: s.id,
+          status: i === 0 ? "awaiting-start" : "pending",
+          sessionId: null,
+          log: [],
+        })),
+        resolvedStages: template.stages,
       };
       setView({ name: "run", run: pendingRun, template });
       const run = await startPipelineRun(template.id, targetDir, runId);
