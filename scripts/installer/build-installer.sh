@@ -7,6 +7,10 @@
 set -e
 trap 'echo -e "${RED}❌ 오류 발생! 라인 $LINENO${NC}"; exit 1' ERR
 
+# 항상 프로젝트 루트에서 실행되도록 이동 (다른 디렉토리에서 호출돼도
+# src-tauri/Cargo.toml 같은 상대경로가 깨지지 않게)
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'; NC='\033[0m'
 
 OS=$(uname -s)

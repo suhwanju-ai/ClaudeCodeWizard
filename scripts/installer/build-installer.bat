@@ -4,6 +4,11 @@ setlocal enabledelayedexpansion
 title Claude Pipeline Wizard - Windows Installer Build
 color 0E
 
+:: Always run from the project root, regardless of how this script was launched
+:: (double-clicked in Explorer, or invoked from another directory) - otherwise
+:: relative paths like src-tauri\Cargo.toml resolve against the wrong folder.
+cd /d "%~dp0..\.."
+
 echo.
 echo  =================================================
 echo   Claude Pipeline Wizard - Windows Installer Build
