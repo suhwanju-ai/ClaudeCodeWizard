@@ -6,7 +6,7 @@ use crate::template::{
 };
 
 use super::executor::{run_stage, ExecutorConfig};
-use super::project_manifest::{write_project_manifest, ProjectManifestError};
+use super::project_manifest::write_project_manifest;
 use super::run_record::{RunRecord, RunRecordStore, RunRecordStoreError, RunStatus, StageStatus};
 use super::stream_json::StageEvent;
 
@@ -18,8 +18,6 @@ pub enum OrchestratorError {
     RunRecordStore(#[from] RunRecordStoreError),
     #[error(transparent)]
     StageValidation(#[from] TemplateValidationError),
-    #[error(transparent)]
-    ProjectManifest(#[from] ProjectManifestError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("run '{0}' is not awaiting a checkpoint")]
@@ -54,7 +52,7 @@ impl Orchestrator {
     /// run with no in-app recovery. So a manifest-write failure is logged and
     /// swallowed here; only a `run_store.save` failure is fatal.
     fn save(&self, template: &Template, record: &RunRecord) -> Result<(), OrchestratorError> {
-        self.run_store.save(record)?;
+        self.save_state_only(record)?;
         if let Err(e) = write_project_manifest(
             Path::new(&record.target_dir),
             &template.id,
@@ -65,6 +63,50 @@ impl Orchestrator {
             eprintln!("failed to write project manifest for run '{}': {e}", record.run_id);
         }
         Ok(())
+    }
+
+    /// Persists only to the authoritative `run_store`, skipping the
+    /// project-local manifest mirror. Used for the interim "stage began
+    /// executing" checkpoint inside `start_stage`: writing both manifest
+    /// files on top of `run_store` at both the start and end of every stage
+    /// run isn't worth the extra I/O, since the manifest catches up with
+    /// the accurate final state at the closing `save()` call regardless.
+    fn save_state_only(&self, record: &RunRecord) -> Result<(), OrchestratorError> {
+        self.run_store.save(record)?;
+        Ok(())
+    }
+
+    /// Runs `stage` (resuming from `resume_session_id` if given), streaming
+    /// events to `on_event`, and appends the collected raw event log onto
+    /// `record.stages[stage_index]`. Returns `run_stage`'s raw result and the
+    /// last-seen session id — callers decide how a non-zero exit or timeout
+    /// maps onto record state, since that differs between `start_stage`
+    /// (checkpoint-or-auto-advance) and `request_changes` (always re-pauses
+    /// at the checkpoint).
+    async fn run_and_record_stage<F: FnMut(&str, StageEvent)>(
+        &self,
+        record: &mut RunRecord,
+        stage_index: usize,
+        stage: &Stage,
+        target_dir: &Path,
+        resume_session_id: Option<&str>,
+        mut on_event: F,
+    ) -> (std::io::Result<i32>, Option<String>) {
+        let stage_id = stage.id.clone();
+        let mut latest_session_id = resume_session_id.map(|s| s.to_string());
+        let mut collected_log = Vec::new();
+
+        let result = run_stage(&self.executor_config, stage, target_dir, resume_session_id, |event| {
+            if let StageEvent::Init { session_id } | StageEvent::Result { session_id, .. } = &event {
+                latest_session_id = Some(session_id.clone());
+            }
+            collected_log.push(serde_json::to_value(&event).unwrap_or(serde_json::Value::Null));
+            on_event(&stage_id, event);
+        })
+        .await;
+
+        record.stages[stage_index].log.extend(collected_log);
+        (result, latest_session_id)
     }
 
     pub fn start_run(
@@ -106,11 +148,12 @@ impl Orchestrator {
         }
 
         record.begin_current_stage();
-        self.save(&template, &record)?;
+        // Interim checkpoint only — see save_state_only's doc comment for why
+        // the project manifest isn't also rewritten here.
+        self.save_state_only(&record)?;
 
         let stage_index = record.current_stage_index;
         let stage = record.current_resolved_stage().clone();
-        let stage_id = stage.id.clone();
         let target_dir = PathBuf::from(record.target_dir.clone());
         let resume_session_id = if stage_index == 0 {
             None
@@ -118,19 +161,9 @@ impl Orchestrator {
             record.stages[stage_index - 1].session_id.clone()
         };
 
-        let mut latest_session_id = resume_session_id.clone();
-        let mut collected_log = Vec::new();
-
-        let result = run_stage(&self.executor_config, &stage, &target_dir, resume_session_id.as_deref(), |event| {
-            if let StageEvent::Init { session_id } | StageEvent::Result { session_id, .. } = &event {
-                latest_session_id = Some(session_id.clone());
-            }
-            collected_log.push(serde_json::to_value(&event).unwrap_or(serde_json::Value::Null));
-            on_event(&stage_id, event);
-        })
-        .await;
-
-        record.stages[stage_index].log.extend(collected_log);
+        let (result, latest_session_id) = self
+            .run_and_record_stage(&mut record, stage_index, &stage, &target_dir, resume_session_id.as_deref(), &mut on_event)
+            .await;
 
         // `_` also catches a timed-out/IO-failed `run_stage` (an `Err`), not just a
         // non-zero exit code — mirrors `request_changes`'s existing timeout handling
@@ -178,28 +211,19 @@ impl Orchestrator {
         let stage_index = record.current_stage_index;
         let mut feedback_stage = record.resolved_stages[stage_index].clone();
         feedback_stage.prompt = feedback.to_string();
-        let stage_id = feedback_stage.id.clone();
 
         let resume_session_id = record.current_stage_mut().session_id.clone();
         let target_dir = PathBuf::from(record.target_dir.clone());
 
         record.status = RunStatus::Running;
         record.current_stage_mut().status = StageStatus::Running;
-        self.save(&template, &record)?;
+        // Interim checkpoint only — see save_state_only's doc comment for why
+        // the project manifest isn't also rewritten here.
+        self.save_state_only(&record)?;
 
-        let mut latest_session_id = resume_session_id.clone();
-        let mut collected_log = Vec::new();
-
-        let result = run_stage(&self.executor_config, &feedback_stage, &target_dir, resume_session_id.as_deref(), |event| {
-            if let StageEvent::Init { session_id } | StageEvent::Result { session_id, .. } = &event {
-                latest_session_id = Some(session_id.clone());
-            }
-            collected_log.push(serde_json::to_value(&event).unwrap_or(serde_json::Value::Null));
-            on_event(&stage_id, event);
-        })
-        .await;
-
-        record.stages[stage_index].log.extend(collected_log);
+        let (result, latest_session_id) = self
+            .run_and_record_stage(&mut record, stage_index, &feedback_stage, &target_dir, resume_session_id.as_deref(), &mut on_event)
+            .await;
 
         match result {
             Ok(0) => record.mark_current_awaiting_checkpoint(latest_session_id.unwrap_or_default()),
@@ -218,5 +242,55 @@ impl Orchestrator {
         record.cancel();
         self.save(&template, &record)?;
         Ok(record)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::template::PermissionMode;
+
+    fn sample_template() -> Template {
+        Template {
+            id: "t1".to_string(),
+            name: "T".to_string(),
+            description: "d".to_string(),
+            stages: vec![Stage {
+                id: "s1".to_string(),
+                name: "S1".to_string(),
+                prompt: "do it".to_string(),
+                permission_mode: PermissionMode::AcceptEdits,
+                allowed_tools: vec![],
+                checkpoint: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn save_state_only_skips_the_project_manifest_write() {
+        let template_dir = tempfile::tempdir().unwrap();
+        let run_dir = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        let template_store = TemplateStore::new(template_dir.path());
+        let template = sample_template();
+        template_store.save(&template).unwrap();
+        let orchestrator =
+            Orchestrator::new(template_store, RunRecordStore::new(run_dir.path()), ExecutorConfig::default());
+
+        let record = RunRecord::new(
+            "run1".to_string(),
+            template.id.clone(),
+            target_dir.path().to_string_lossy().to_string(),
+            &template.stages,
+        );
+
+        let manifest_dir = target_dir.path().join(".claude-pipeline-wizard");
+
+        orchestrator.save_state_only(&record).unwrap();
+        assert!(orchestrator.run_store.load("run1").is_ok(), "run_store must still be authoritative");
+        assert!(!manifest_dir.exists(), "save_state_only must not touch the project-local manifest");
+
+        orchestrator.save(&template, &record).unwrap();
+        assert!(manifest_dir.join("run.json").exists(), "the full save() must still write the manifest");
     }
 }

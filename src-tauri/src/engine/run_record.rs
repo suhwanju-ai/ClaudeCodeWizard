@@ -129,6 +129,15 @@ pub enum RunRecordStoreError {
     NotFound(String),
     #[error("invalid id '{0}': ids must be non-empty, contain only letters, digits, '.', '_', or '-', and not be '.' or '..'")]
     InvalidId(String),
+    #[error("run '{0}' is corrupted: current_stage_index is out of range or stages/resolved_stages lengths differ")]
+    Corrupted(String),
+}
+
+fn validate_invariants(record: &RunRecord) -> Result<(), RunRecordStoreError> {
+    if record.current_stage_index >= record.stages.len() || record.stages.len() != record.resolved_stages.len() {
+        return Err(RunRecordStoreError::Corrupted(record.run_id.clone()));
+    }
+    Ok(())
 }
 
 pub struct RunRecordStore {
@@ -148,6 +157,7 @@ impl RunRecordStore {
         if !is_valid_id(&record.run_id) {
             return Err(RunRecordStoreError::InvalidId(record.run_id.clone()));
         }
+        validate_invariants(record)?;
         fs::create_dir_all(&self.dir)?;
         let content = serde_json::to_string_pretty(record)?;
         fs::write(self.path_for(&record.run_id), content)?;
@@ -163,7 +173,9 @@ impl RunRecordStore {
             return Err(RunRecordStoreError::NotFound(run_id.to_string()));
         }
         let content = fs::read_to_string(path)?;
-        Ok(serde_json::from_str(&content)?)
+        let record: RunRecord = serde_json::from_str(&content)?;
+        validate_invariants(&record)?;
+        Ok(record)
     }
 }
 
@@ -299,5 +311,36 @@ mod tests {
         let mut r = record(&["a"]);
         r.run_id = "../../../etc/passwd".to_string();
         assert!(matches!(store.save(&r), Err(RunRecordStoreError::InvalidId(_))));
+    }
+
+    #[test]
+    fn save_rejects_current_stage_index_out_of_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunRecordStore::new(dir.path());
+        let mut r = record(&["a"]);
+        r.current_stage_index = 5;
+        assert!(matches!(store.save(&r), Err(RunRecordStoreError::Corrupted(_))));
+    }
+
+    #[test]
+    fn save_rejects_resolved_stages_length_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunRecordStore::new(dir.path());
+        let mut r = record(&["a", "b"]);
+        r.resolved_stages.pop();
+        assert!(matches!(store.save(&r), Err(RunRecordStoreError::Corrupted(_))));
+    }
+
+    #[test]
+    fn load_rejects_a_corrupted_record_found_on_disk() {
+        // A record can only become corrupted by something outside save()'s own
+        // validation -- e.g. hand-editing or disk corruption -- so this test
+        // writes the bad JSON directly rather than going through `save`.
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunRecordStore::new(dir.path());
+        let mut r = record(&["a"]);
+        r.current_stage_index = 5;
+        fs::write(dir.path().join("run1.json"), serde_json::to_string(&r).unwrap()).unwrap();
+        assert!(matches!(store.load("run1"), Err(RunRecordStoreError::Corrupted(_))));
     }
 }
