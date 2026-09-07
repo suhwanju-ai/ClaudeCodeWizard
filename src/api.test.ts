@@ -12,12 +12,13 @@ import {
   deleteTemplate,
   checkCli,
   startPipelineRun,
+  startStage,
   approveCheckpoint,
   requestChanges,
   rejectCheckpoint,
   onStageEvent,
 } from "./api";
-import type { Template } from "./types";
+import type { Stage, Template } from "./types";
 
 const invokeMock = vi.mocked(invoke);
 const listenMock = vi.mocked(listen);
@@ -67,6 +68,23 @@ describe("api wrapper", () => {
       targetDir: "/tmp/proj",
       runId: "run1",
     });
+  });
+
+  it("startStage invokes start_stage with runId and an optional stage override", async () => {
+    invokeMock.mockResolvedValue({});
+    const stage: Stage = {
+      id: "s1",
+      name: "Stage 1",
+      prompt: "edited prompt",
+      permissionMode: "acceptEdits",
+      allowedTools: [],
+      checkpoint: true,
+    };
+    await startStage("run1", stage);
+    expect(invokeMock).toHaveBeenCalledWith("start_stage", { runId: "run1", stageOverride: stage });
+
+    await startStage("run1");
+    expect(invokeMock).toHaveBeenCalledWith("start_stage", { runId: "run1", stageOverride: null });
   });
 
   it("approveCheckpoint invokes approve_checkpoint with runId", async () => {

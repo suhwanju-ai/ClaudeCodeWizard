@@ -16,8 +16,8 @@ export interface Template {
   stages: Stage[];
 }
 
-export type StageStatus = "pending" | "running" | "awaiting-checkpoint" | "approved" | "failed";
-export type RunStatus = "running" | "awaiting-checkpoint" | "completed" | "failed" | "cancelled";
+export type StageStatus = "pending" | "awaiting-start" | "running" | "awaiting-checkpoint" | "approved" | "failed";
+export type RunStatus = "awaiting-stage-start" | "running" | "awaiting-checkpoint" | "completed" | "failed" | "cancelled";
 
 export interface StageRun {
   id: string;
@@ -33,6 +33,7 @@ export interface RunRecord {
   status: RunStatus;
   currentStageIndex: number;
   stages: StageRun[];
+  resolvedStages: Stage[];
 }
 
 export type StageEvent =

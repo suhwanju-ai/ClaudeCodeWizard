@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { RunRecord, StageEventPayload, Template } from "./types";
+import type { RunRecord, Stage, StageEventPayload, Template } from "./types";
 
 export function listTemplates(): Promise<Template[]> {
   return invoke("list_templates");
@@ -24,6 +24,10 @@ export function checkCli(): Promise<string> {
 
 export function startPipelineRun(templateId: string, targetDir: string, runId: string): Promise<RunRecord> {
   return invoke("start_pipeline_run", { templateId, targetDir, runId });
+}
+
+export function startStage(runId: string, stageOverride?: Stage): Promise<RunRecord> {
+  return invoke("start_stage", { runId, stageOverride: stageOverride ?? null });
 }
 
 export function approveCheckpoint(runId: string): Promise<RunRecord> {
