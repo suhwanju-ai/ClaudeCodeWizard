@@ -266,57 +266,85 @@ impl Orchestrator {
         Ok(record)
     }
 
+    /// Approving a checkpoint no longer starts the next stage. It advances to the next
+    /// stage's gate and returns (PRD A-3), so this method is now purely synchronous
+    /// work. `on_event` is kept in the signature — and never called — so the Tauri
+    /// command and its callers do not change shape.
     pub async fn approve_checkpoint<F: FnMut(&str, StageEvent)>(
         &self,
         run_id: &str,
-        mut on_event: F,
+        _on_event: F,
     ) -> Result<RunRecord, OrchestratorError> {
+        let lock = self.lock_for(run_id);
+        let _guard = lock.lock().await;
+
         let mut record = self.run_store.load(run_id)?;
         if record.status != RunStatus::AwaitingCheckpoint {
             return Err(OrchestratorError::NotAwaitingCheckpoint(run_id.to_string()));
         }
-        // COMPILE BRIDGE (Task 8): `drive()` is gone and Task 9 rewrites this whole
-        // function to be a pure, non-executing transition. Until then it just approves
-        // the current stage and parks at the next gate — no process is spawned.
-        let _ = &mut on_event;
+        // No template_store.load here any more: the run's own resolved_stages are the
+        // source of truth, which is half of what closes the C-4 leak (IMP-007).
+        let snapshot = record.clone();
         record.approve_current();
-        self.run_store.save(&record)?;
+        self.save_with_rollback(&record, &snapshot)?;
         Ok(record)
     }
 
+    /// Re-runs the current stage with the user's feedback as its prompt.
+    ///
+    /// The stage definition comes from `resolved_stages`, so pre-start edits to
+    /// permission mode / allowed tools / checkpoint are inherited (PRD C-3) and a
+    /// mid-run template edit cannot leak in (PRD C-4). The prompt override is applied to
+    /// a local clone only and is deliberately *not* written back to `resolved_stages` —
+    /// feedback is one-shot (design decision, and IMP-020 decision D7 keeps it unlogged).
     pub async fn request_changes<F: FnMut(&str, StageEvent)>(
         &self,
         run_id: &str,
         feedback: &str,
         mut on_event: F,
     ) -> Result<RunRecord, OrchestratorError> {
-        let mut record = self.run_store.load(run_id)?;
-        if record.status != RunStatus::AwaitingCheckpoint {
-            return Err(OrchestratorError::NotAwaitingCheckpoint(run_id.to_string()));
-        }
-        let template = self.template_store.load(&record.template_id)?;
+        let lock = self.lock_for(run_id);
+        let mut record = {
+            let _guard = lock.lock().await;
+
+            let mut record = self.run_store.load(run_id)?;
+            if record.status != RunStatus::AwaitingCheckpoint {
+                return Err(OrchestratorError::NotAwaitingCheckpoint(run_id.to_string()));
+            }
+            // Persist Running before spawning (0235a40 precedent).
+            let snapshot = record.clone();
+            record.status = RunStatus::Running;
+            record.current_stage_mut().status = StageStatus::Running;
+            self.save_with_rollback(&record, &snapshot)?;
+            record
+        }; // lock released before the spawn, same scope rule as start_stage.
+
+        // TRD 3.3-(4a) rule (b): a re-run continues its OWN stage's session.
+        let resume_session_id = record.stages[record.current_stage_index].session_id.clone();
+
+        // Swap in the feedback prompt on a throwaway clone of the resolved stage.
         let stage_index = record.current_stage_index;
-        let mut feedback_stage = template.stages[stage_index].clone();
+        let mut feedback_stage = record.current_resolved_stage().clone();
         feedback_stage.prompt = feedback.to_string();
         let stage_id = feedback_stage.id.clone();
-
-        let resume_session_id = record.current_stage_mut().session_id.clone();
         let target_dir = PathBuf::from(record.target_dir.clone());
-
-        record.status = RunStatus::Running;
-        record.current_stage_mut().status = StageStatus::Running;
-        self.run_store.save(&record)?;
 
         let mut latest_session_id = resume_session_id.clone();
         let mut collected_log = Vec::new();
 
-        let result = run_stage(&self.executor_config, &feedback_stage, &target_dir, resume_session_id.as_deref(), |event| {
-            if let StageEvent::Init { session_id } | StageEvent::Result { session_id, .. } = &event {
-                latest_session_id = Some(session_id.clone());
-            }
-            collected_log.push(serde_json::to_value(&event).unwrap_or(serde_json::Value::Null));
-            on_event(&stage_id, event);
-        })
+        let result = run_stage(
+            &self.executor_config,
+            &feedback_stage,
+            &target_dir,
+            resume_session_id.as_deref(),
+            |event| {
+                if let StageEvent::Init { session_id } | StageEvent::Result { session_id, .. } = &event {
+                    latest_session_id = Some(session_id.clone());
+                }
+                collected_log.push(serde_json::to_value(&event).unwrap_or(serde_json::Value::Null));
+                on_event(&stage_id, event);
+            },
+        )
         .await;
 
         record.stages[stage_index].log.extend(collected_log);
@@ -325,7 +353,28 @@ impl Orchestrator {
             Ok(0) => record.mark_current_awaiting_checkpoint(latest_session_id.unwrap_or_default()),
             _ => record.mark_current_failed(),
         }
-        self.run_store.save(&record)?;
+        self.save(&record)?;
+        Ok(record)
+    }
+
+    /// IMP-014 / PRD D-1, D-2. A run parked at a pre-stage gate previously had exactly
+    /// one available action — "run it" — which is the shape of the 08e9144 stuck-state
+    /// bug. This widens the escape hatch to both waiting states.
+    ///
+    /// `Failed` is deliberately absent: decision D1 keeps it terminal, so a failed run is
+    /// already in a final state and does not need cancelling.
+    ///
+    /// Takes no lock: it is synchronous, and a `tokio::sync::Mutex` cannot be acquired
+    /// from a non-async function. Its load-check-save window is short and its only
+    /// interleaving risk is with a running stage, which by design releases the lock
+    /// before spawning anyway — so a lock here would not add protection.
+    pub fn cancel_run(&self, run_id: &str) -> Result<RunRecord, OrchestratorError> {
+        let mut record = self.run_store.load(run_id)?;
+        if !matches!(record.status, RunStatus::AwaitingCheckpoint | RunStatus::AwaitingStageStart) {
+            return Err(OrchestratorError::NotCancellable(run_id.to_string()));
+        }
+        record.cancel();
+        self.save(&record)?;
         Ok(record)
     }
 
@@ -335,7 +384,7 @@ impl Orchestrator {
             return Err(OrchestratorError::NotAwaitingCheckpoint(run_id.to_string()));
         }
         record.cancel();
-        self.run_store.save(&record)?;
+        self.save(&record)?;
         Ok(record)
     }
 }

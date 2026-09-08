@@ -193,22 +193,6 @@ async fn stale_stage_index_error_carries_the_frontend_prefix() {
     assert!(e.to_string().starts_with("STALE_STAGE_INDEX:"), "got {e}");
 }
 
-#[tokio::test]
-async fn request_changes_marks_run_failed_instead_of_stuck_running_on_run_stage_timeout() {
-    let h = setup_with_timeout(two_stage_template(), std::time::Duration::from_millis(100));
-
-    h.orchestrator.start_run("two-stage", h.target(), "run1".to_string()).unwrap();
-
-    let hang_feedback = fixture_prompt("executor_hang.jsonl");
-    let result = h.orchestrator.request_changes("run1", &hang_feedback, |_, _| {}).await.unwrap();
-
-    assert_eq!(result.status, RunStatus::Failed);
-    assert_eq!(result.stages[0].status, StageStatus::Failed);
-
-    assert_eq!(h.persisted("run1").status, RunStatus::Failed);
-    assert_eq!(h.persisted("run1").stages[0].status, StageStatus::Failed);
-}
-
 fn resume_arg(call: &[String]) -> Option<&str> {
     call.iter().position(|a| a == "--resume").and_then(|i| call.get(i + 1)).map(String::as_str)
 }
@@ -448,4 +432,204 @@ async fn failed_run_rejects_start_stage() {
     let result = h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await;
 
     assert!(matches!(result, Err(OrchestratorError::NotAwaitingStageStart(_))), "got {result:?}");
+}
+
+// T-A3
+#[tokio::test]
+async fn approve_checkpoint_does_not_spawn_and_returns_to_gate() {
+    let h = setup(); // stage1 checkpoints, stage2 does not
+    h.orchestrator.start_run("two-stage", h.target(), "run1".to_string()).unwrap();
+    h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.unwrap();
+
+    let record = h.orchestrator.approve_checkpoint("run1", |_, _| {}).await.unwrap();
+
+    // PRD A-3: approval advances to the next stage's gate, it does not start it.
+    assert_eq!(record.status, RunStatus::AwaitingStageStart);
+    assert_eq!(record.current_stage_index, 1);
+    assert_eq!(record.stages[0].status, StageStatus::Approved);
+    assert_eq!(record.stages[1].status, StageStatus::AwaitingStart);
+    assert_eq!(h.call_count(), 1, "approve_checkpoint must not spawn (PRD A-4)");
+}
+
+#[tokio::test]
+async fn approve_checkpoint_on_the_last_stage_completes_the_run() {
+    let h = setup_with(Template {
+        id: "single-cp".to_string(),
+        name: "Single".to_string(),
+        description: "desc".to_string(),
+        stages: vec![stage("stage1", "orchestrator_stage1.jsonl", true)],
+    });
+    h.orchestrator.start_run("single-cp", h.target(), "run1".to_string()).unwrap();
+    h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.unwrap();
+
+    let record = h.orchestrator.approve_checkpoint("run1", |_, _| {}).await.unwrap();
+
+    assert_eq!(record.status, RunStatus::Completed);
+    assert_eq!(h.call_count(), 1);
+}
+
+#[tokio::test]
+async fn approve_checkpoint_rejects_a_run_that_is_not_at_a_checkpoint() {
+    let h = setup();
+    h.orchestrator.start_run("two-stage", h.target(), "run1".to_string()).unwrap();
+
+    let result = h.orchestrator.approve_checkpoint("run1", |_, _| {}).await;
+
+    assert!(matches!(result, Err(OrchestratorError::NotAwaitingCheckpoint(ref id)) if id == "run1"), "got {result:?}");
+}
+
+#[tokio::test]
+async fn request_changes_reruns_the_current_stage_and_stays_at_the_checkpoint() {
+    let h = setup();
+    h.orchestrator.start_run("two-stage", h.target(), "run1".to_string()).unwrap();
+    h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.unwrap();
+
+    let record = h
+        .orchestrator
+        .request_changes("run1", &fixture_prompt("orchestrator_feedback.jsonl"), |_, _| {})
+        .await
+        .unwrap();
+
+    assert_eq!(record.status, RunStatus::AwaitingCheckpoint);
+    assert_eq!(record.current_stage_index, 0);
+    assert_eq!(record.stages[0].session_id, Some("sess-orch-1-revised".to_string()));
+    assert_eq!(h.call_count(), 2);
+}
+
+// T-A6 — TRD 3.3-(4a) rule (b): a re-run resumes its OWN stage's session,
+// not the previous stage's.
+#[tokio::test]
+async fn request_changes_resumes_own_stage_session() {
+    let h = setup();
+    h.orchestrator.start_run("two-stage", h.target(), "run1".to_string()).unwrap();
+    h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.unwrap();
+
+    h.orchestrator
+        .request_changes("run1", &fixture_prompt("orchestrator_feedback.jsonl"), |_, _| {})
+        .await
+        .unwrap();
+
+    let calls = h.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(resume_arg(&calls[1]), Some("sess-orch-1"), "stage 1's own session, not stage 0's");
+}
+
+// T-C3
+#[tokio::test]
+async fn request_changes_inherits_pre_start_edits() {
+    let h = setup();
+    h.orchestrator.start_run("two-stage", h.target(), "run1".to_string()).unwrap();
+
+    // Pre-start edit: change permission mode and allowed tools for this run only.
+    let mut edited = stage("stage1", "orchestrator_stage1.jsonl", true);
+    edited.permission_mode = PermissionMode::BypassPermissions;
+    edited.allowed_tools = vec!["Read".to_string(), "Bash".to_string()];
+    h.orchestrator.start_stage("run1", 0, Some(edited), |_, _| {}).await.unwrap();
+
+    h.orchestrator
+        .request_changes("run1", &fixture_prompt("orchestrator_feedback.jsonl"), |_, _| {})
+        .await
+        .unwrap();
+
+    let calls = h.calls();
+    let rerun = &calls[1];
+    assert!(
+        rerun.windows(2).any(|w| w[0] == "--permission-mode" && w[1] == "bypassPermissions"),
+        "the re-run kept the edited permission mode: {rerun:?}"
+    );
+    assert!(
+        rerun.windows(2).any(|w| w[0] == "--allowedTools" && w[1] == "Read,Bash"),
+        "the re-run kept the edited allowed tools: {rerun:?}"
+    );
+}
+
+// T-C4
+#[tokio::test]
+async fn template_edited_mid_run_does_not_leak_into_the_run() {
+    let h = setup(); // stage1 checkpoints, stage2 does not
+    h.orchestrator.start_run("two-stage", h.target(), "run1".to_string()).unwrap();
+    h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.unwrap();
+
+    // Someone edits the saved template while the run sits at its checkpoint.
+    let mut template = h.orchestrator.template_store.load("two-stage").unwrap();
+    template.stages[1].prompt = fixture_prompt("orchestrator_feedback.jsonl");
+    template.stages[1].allowed_tools = vec!["Bash".to_string()];
+    h.orchestrator.template_store.save(&template).unwrap();
+
+    h.orchestrator.approve_checkpoint("run1", |_, _| {}).await.unwrap();
+    let record = h.orchestrator.start_stage("run1", 1, None, |_, _| {}).await.unwrap();
+
+    // The run used its own resolvedStages copy, not the edited template.
+    assert_eq!(record.resolved_stages[1].prompt, fixture_prompt("orchestrator_stage2.jsonl"));
+    let calls = h.calls();
+    assert!(
+        !calls[1].iter().any(|a| a == "--allowedTools"),
+        "the mid-run template edit must not reach the spawned process: {:?}",
+        calls[1]
+    );
+}
+
+// Replacement for the deleted request_changes timeout test (08e9144 precedent)
+#[tokio::test]
+async fn request_changes_marks_run_failed_instead_of_stuck_running_on_timeout() {
+    let h = setup_with_timeout(two_stage_template(), std::time::Duration::from_millis(100));
+    h.orchestrator.start_run("two-stage", h.target(), "run1".to_string()).unwrap();
+    h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.unwrap();
+
+    let record = h
+        .orchestrator
+        .request_changes("run1", &fixture_prompt("executor_hang.jsonl"), |_, _| {})
+        .await
+        .unwrap();
+
+    assert_eq!(record.status, RunStatus::Failed);
+    assert_eq!(record.stages[0].status, StageStatus::Failed);
+    assert_eq!(h.persisted("run1").status, RunStatus::Failed);
+}
+
+// T-D1 / PRD D-1, D-2
+#[tokio::test]
+async fn cancel_run_from_awaiting_stage_start_sets_cancelled() {
+    let h = setup();
+    h.orchestrator.start_run("two-stage", h.target(), "run1".to_string()).unwrap();
+
+    let record = h.orchestrator.cancel_run("run1").unwrap();
+
+    assert_eq!(record.status, RunStatus::Cancelled);
+    assert_eq!(h.persisted("run1").status, RunStatus::Cancelled, "the on-disk record must reflect it too");
+    // The manifest is refreshed by the same transition.
+    let run_json = std::fs::read_to_string(manifest_run_path(h.target_dir.path())).unwrap();
+    assert!(run_json.contains("\"cancelled\""));
+}
+
+#[tokio::test]
+async fn cancel_run_from_awaiting_checkpoint_sets_cancelled() {
+    let h = setup();
+    h.orchestrator.start_run("two-stage", h.target(), "run1".to_string()).unwrap();
+    h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.unwrap();
+
+    assert_eq!(h.orchestrator.cancel_run("run1").unwrap().status, RunStatus::Cancelled);
+}
+
+// Decision D1: Failed is terminal, so it is not cancellable either.
+#[tokio::test]
+async fn cancel_run_rejects_a_terminal_run() {
+    let h = setup();
+    h.orchestrator.start_run("two-stage", h.target(), "run1".to_string()).unwrap();
+    h.orchestrator.cancel_run("run1").unwrap();
+
+    let result = h.orchestrator.cancel_run("run1");
+
+    assert!(matches!(result, Err(OrchestratorError::NotCancellable(ref id)) if id == "run1"), "got {result:?}");
+}
+
+// Optional closure of a pre-existing gap (Task 7 never added a reject_checkpoint test).
+#[tokio::test]
+async fn reject_checkpoint_rejects_a_run_not_awaiting_checkpoint() {
+    let h = setup();
+    h.orchestrator.start_run("two-stage", h.target(), "run1".to_string()).unwrap();
+
+    let result = h.orchestrator.reject_checkpoint("run1");
+
+    assert!(matches!(result, Err(OrchestratorError::NotAwaitingCheckpoint(ref id)) if id == "run1"), "got {result:?}");
 }
