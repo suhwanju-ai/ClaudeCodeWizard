@@ -1,10 +1,10 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::template::{
-    store::StoreError as TemplateStoreError, store::TemplateStore, validate_template, Template,
-    TemplateValidationError,
+    store::StoreError as TemplateStoreError, store::TemplateStore, validate_stage,
+    validate_template, Stage, TemplateValidationError,
 };
 
 use super::executor::{run_stage, ExecutorConfig};
@@ -134,56 +134,136 @@ impl Orchestrator {
         Ok(record)
     }
 
-    /// Runs stages starting at `record.current_stage_index`, auto-advancing
-    /// through any stage with `checkpoint == false`, and stops at the first
-    /// checkpointed stage, a failure, or the end of the pipeline.
-    async fn drive<F: FnMut(&str, StageEvent)>(
-        &self,
-        template: &Template,
-        record: &mut RunRecord,
-        target_dir: &Path,
-        mut resume_session_id: Option<String>,
-        on_event: &mut F,
-    ) -> Result<(), OrchestratorError> {
-        loop {
-            let stage_index = record.current_stage_index;
-            let stage = &template.stages[stage_index];
-            let stage_id = stage.id.clone();
-            let mut latest_session_id = resume_session_id.clone();
-            let mut collected_log = Vec::new();
+    /// TRD 3.3-(4a) rule (a). A stage continues the previous stage's Claude session; the
+    /// first stage starts fresh. At any gate `stages[current_stage_index - 1].session_id`
+    /// is already populated — `advance_to_gate` fills it for non-checkpoint stages and
+    /// `mark_current_awaiting_checkpoint` fills it for checkpointed ones — so this reads
+    /// the session the previous stage really used. The value is passed through verbatim,
+    /// including the empty string the old `unwrap_or_default()` could produce; that is
+    /// existing behaviour and normalizing it is out of scope.
+    fn resume_session_id_for(record: &RunRecord) -> Option<String> {
+        let idx = record.current_stage_index;
+        if idx == 0 {
+            None
+        } else {
+            record.stages[idx - 1].session_id.clone()
+        }
+    }
 
-            let exit_code = run_stage(&self.executor_config, stage, target_dir, resume_session_id.as_deref(), |event| {
+    /// Executes exactly one stage — the one `record.current_resolved_stage()` names — and
+    /// returns `(exit_code, latest_session_id)`. It makes no state decisions and contains
+    /// no loop: `start_stage` and `request_changes` own every transition (M2).
+    async fn run_current_stage<F: FnMut(&str, StageEvent)>(
+        &self,
+        record: &mut RunRecord,
+        resume_session_id: Option<String>,
+        on_event: &mut F,
+    ) -> Result<(i32, Option<String>), OrchestratorError> {
+        let stage_index = record.current_stage_index;
+        // Cloned because `record` is mutably borrowed for the log append below.
+        let stage = record.current_resolved_stage().clone();
+        let stage_id = stage.id.clone();
+        let target_dir = PathBuf::from(record.target_dir.clone());
+
+        let mut latest_session_id = resume_session_id.clone();
+        let mut collected_log = Vec::new();
+
+        let exit_code = run_stage(
+            &self.executor_config,
+            &stage,
+            &target_dir,
+            resume_session_id.as_deref(),
+            |event| {
                 if let StageEvent::Init { session_id } | StageEvent::Result { session_id, .. } = &event {
                     latest_session_id = Some(session_id.clone());
                 }
                 collected_log.push(serde_json::to_value(&event).unwrap_or(serde_json::Value::Null));
                 on_event(&stage_id, event);
-            })
-            .await?;
+            },
+        )
+        .await?;
 
-            record.stages[stage_index].log.extend(collected_log);
+        record.stages[stage_index].log.extend(collected_log);
+        Ok((exit_code, latest_session_id))
+    }
 
-            if exit_code != 0 {
-                record.mark_current_failed();
-                return Ok(());
+    /// The only path in the app that spawns a claude process (PRD A-4).
+    ///
+    /// `expected_stage_index` is the index the caller believes the run is at. It is a
+    /// required argument, not an optional nicety: `stage_override` is `Option`, so the
+    /// id check inside `apply_stage_override` cannot be relied on to catch a stale call
+    /// (TRD 3.8).
+    ///
+    /// Lock scope is steps 1-5 only. The child process (step 6) and the post-run
+    /// transition (steps 7-8) run outside it, so a multi-minute stage never blocks this
+    /// run's own `cancel_run` (TRD 3.3-(3), 3.8).
+    pub async fn start_stage<F: FnMut(&str, StageEvent)>(
+        &self,
+        run_id: &str,
+        expected_stage_index: usize,
+        stage_override: Option<Stage>,
+        mut on_event: F,
+    ) -> Result<RunRecord, OrchestratorError> {
+        let lock = self.lock_for(run_id);
+        let mut record = {
+            let _guard = lock.lock().await;
+
+            // 1. load
+            let mut record = self.run_store.load(run_id)?;
+
+            // 2. guard (i) — status. Also what rejects the loser of a concurrent race,
+            //    because the winner has already persisted Running by the time the lock
+            //    is handed over (T-D4a).
+            if record.status != RunStatus::AwaitingStageStart {
+                return Err(OrchestratorError::NotAwaitingStageStart(run_id.to_string()));
             }
 
-            let session_id = latest_session_id.unwrap_or_default();
-            if stage.checkpoint {
-                record.mark_current_awaiting_checkpoint(session_id);
-                return Ok(());
+            // 2b. guard (ii) — generation. Rejects a call that was composed against an
+            //     earlier gate and arrived after the run moved on (T-D4b). A rejection
+            //     is not a transition: nothing on disk changes.
+            if record.current_stage_index != expected_stage_index {
+                return Err(OrchestratorError::StaleStageIndex {
+                    expected: expected_stage_index,
+                    actual: record.current_stage_index,
+                });
             }
 
-            record.current_stage_mut().status = StageStatus::Approved;
-            record.current_stage_mut().session_id = Some(session_id.clone());
-            if record.current_stage_index + 1 >= record.stages.len() {
-                record.status = RunStatus::Completed;
-                return Ok(());
+            // 3. apply the user's pre-start edits to this run only (IMP-006).
+            if let Some(override_stage) = stage_override {
+                validate_stage(&override_stage)?;
+                record.apply_stage_override(override_stage)?;
             }
-            record.current_stage_index += 1;
-            record.status = RunStatus::Running;
-            resume_session_id = Some(session_id);
+
+            // 4-5. persist Running before spawning (0235a40 precedent), rolling back if
+            //      the manifest write fails (IMP-015).
+            let snapshot = record.clone();
+            record.begin_current_stage();
+            self.save_with_rollback(&record, &snapshot)?;
+
+            record
+        }; // 5. lock released here — before the spawn.
+
+        // 6. run the stage, outside the lock.
+        let resume = Self::resume_session_id_for(&record);
+        let outcome = self.run_current_stage(&mut record, resume, &mut on_event).await;
+
+        // 7. absorb the outcome. An Err is never propagated with `?` — that is exactly
+        //    how 08e9144 stranded a run at status=running.
+        match outcome {
+            Ok((0, session_id)) => {
+                let session_id = session_id.unwrap_or_default();
+                if record.current_resolved_stage().checkpoint {
+                    record.mark_current_awaiting_checkpoint(session_id); // T3
+                } else {
+                    record.advance_to_gate(session_id); // T4 / T5
+                }
+            }
+            _ => record.mark_current_failed(), // T6
         }
+
+        // 8. persist the result.
+        self.save(&record)?;
+        Ok(record)
     }
 
     pub async fn approve_checkpoint<F: FnMut(&str, StageEvent)>(
@@ -195,17 +275,11 @@ impl Orchestrator {
         if record.status != RunStatus::AwaitingCheckpoint {
             return Err(OrchestratorError::NotAwaitingCheckpoint(run_id.to_string()));
         }
-        let template = self.template_store.load(&record.template_id)?;
-        let resume_session_id = record.current_stage_mut().session_id.clone();
-        let target_dir = PathBuf::from(record.target_dir.clone());
-        let completed = record.approve_current();
-        if !completed {
-            record.current_stage_mut().status = StageStatus::Running;
-            self.run_store.save(&record)?;
-            if self.drive(&template, &mut record, &target_dir, resume_session_id, &mut on_event).await.is_err() {
-                record.mark_current_failed();
-            }
-        }
+        // COMPILE BRIDGE (Task 8): `drive()` is gone and Task 9 rewrites this whole
+        // function to be a pure, non-executing transition. Until then it just approves
+        // the current stage and parks at the next gate — no process is spawned.
+        let _ = &mut on_event;
+        record.approve_current();
         self.run_store.save(&record)?;
         Ok(record)
     }

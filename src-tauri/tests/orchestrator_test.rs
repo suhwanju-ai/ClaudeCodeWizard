@@ -194,29 +194,6 @@ async fn stale_stage_index_error_carries_the_frontend_prefix() {
 }
 
 #[tokio::test]
-async fn approve_checkpoint_marks_run_failed_instead_of_stuck_running_on_drive_timeout() {
-    let h = setup_with_timeout(
-        Template {
-            id: "hang-two-stage".to_string(),
-            name: "Hang Two Stage".to_string(),
-            description: "desc".to_string(),
-            stages: vec![
-                stage("stage1", "orchestrator_stage1.jsonl", true),
-                stage("stage2", "executor_hang.jsonl", true),
-            ],
-        },
-        std::time::Duration::from_millis(100),
-    );
-    h.orchestrator.start_run("hang-two-stage", h.target(), "run1".to_string()).unwrap();
-
-    let result = h.orchestrator.approve_checkpoint("run1", |_, _| {}).await.unwrap();
-
-    assert_eq!(result.status, RunStatus::Failed);
-    assert_eq!(result.stages[1].status, StageStatus::Failed);
-    assert_eq!(h.persisted("run1").status, RunStatus::Failed);
-}
-
-#[tokio::test]
 async fn request_changes_marks_run_failed_instead_of_stuck_running_on_run_stage_timeout() {
     let h = setup_with_timeout(two_stage_template(), std::time::Duration::from_millis(100));
 
@@ -230,4 +207,245 @@ async fn request_changes_marks_run_failed_instead_of_stuck_running_on_run_stage_
 
     assert_eq!(h.persisted("run1").status, RunStatus::Failed);
     assert_eq!(h.persisted("run1").stages[0].status, StageStatus::Failed);
+}
+
+fn resume_arg(call: &[String]) -> Option<&str> {
+    call.iter().position(|a| a == "--resume").and_then(|i| call.get(i + 1)).map(String::as_str)
+}
+
+// T-A2
+#[tokio::test]
+async fn non_checkpoint_stage_completion_returns_to_gate() {
+    let h = setup_with(no_checkpoint_two_stage_template());
+    h.orchestrator.start_run("no-cp-two-stage", h.target(), "run1".to_string()).unwrap();
+
+    let record = h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.unwrap();
+
+    // PRD A-2: no auto-advance. The run parks at the *next* stage's gate.
+    assert_eq!(record.status, RunStatus::AwaitingStageStart);
+    assert_eq!(record.current_stage_index, 1);
+    assert_eq!(record.stages[0].status, StageStatus::Approved);
+    assert_eq!(record.stages[1].status, StageStatus::AwaitingStart);
+    assert_eq!(h.call_count(), 1, "exactly one stage ran");
+}
+
+// T-A4
+#[tokio::test]
+async fn full_pipeline_requires_n_start_stage_calls() {
+    let h = setup_with(no_checkpoint_two_stage_template());
+    h.orchestrator.start_run("no-cp-two-stage", h.target(), "run1".to_string()).unwrap();
+
+    h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.unwrap();
+    let record = h.orchestrator.start_stage("run1", 1, None, |_, _| {}).await.unwrap();
+
+    assert_eq!(record.status, RunStatus::Completed);
+    assert_eq!(record.stages[1].status, StageStatus::Approved);
+    // PRD A-2: N stages needed exactly N explicit start_stage calls.
+    assert_eq!(h.call_count(), 2);
+}
+
+// T-A5 — session chaining survives the removal of drive()
+#[tokio::test]
+async fn start_stage_resumes_previous_stage_session() {
+    let h = setup_with(no_checkpoint_two_stage_template());
+    h.orchestrator.start_run("no-cp-two-stage", h.target(), "run1".to_string()).unwrap();
+
+    h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.unwrap();
+    h.orchestrator.start_stage("run1", 1, None, |_, _| {}).await.unwrap();
+
+    let calls = h.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(resume_arg(&calls[0]), None, "the first stage starts a fresh session");
+    assert_eq!(
+        resume_arg(&calls[1]),
+        Some("sess-orch-1"),
+        "the second stage resumes stage 1's session (TRD 3.3-(4a) rule (a))"
+    );
+    assert_eq!(h.persisted("run1").stages[0].session_id, Some("sess-orch-1".to_string()));
+}
+
+// T-A5, checkpoint variant — the same chaining must hold across an approval (T7)
+#[tokio::test]
+async fn start_stage_after_approve_checkpoint_resumes_the_checkpointed_session() {
+    let h = setup(); // stage1 checkpoints
+    h.orchestrator.start_run("two-stage", h.target(), "run1".to_string()).unwrap();
+
+    h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.unwrap();
+    h.orchestrator.approve_checkpoint("run1", |_, _| {}).await.unwrap();
+    h.orchestrator.start_stage("run1", 1, None, |_, _| {}).await.unwrap();
+
+    let calls = h.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(resume_arg(&calls[1]), Some("sess-orch-1"));
+}
+
+// T-E1
+#[tokio::test]
+async fn start_stage_on_non_gate_status_returns_not_awaiting_stage_start() {
+    let h = setup();
+    h.orchestrator.start_run("two-stage", h.target(), "run1".to_string()).unwrap();
+    h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.unwrap(); // now AwaitingCheckpoint
+
+    let result = h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await;
+
+    assert!(matches!(result, Err(OrchestratorError::NotAwaitingStageStart(ref id)) if id == "run1"), "got {result:?}");
+    assert_eq!(h.call_count(), 1);
+}
+
+// T-F1
+#[tokio::test]
+async fn start_stage_rejects_an_invalid_override() {
+    let h = setup();
+    h.orchestrator.start_run("two-stage", h.target(), "run1".to_string()).unwrap();
+
+    let mut blank = stage("stage1", "orchestrator_stage1.jsonl", true);
+    blank.prompt = "   ".to_string();
+    let result = h.orchestrator.start_stage("run1", 0, Some(blank), |_, _| {}).await;
+
+    assert!(matches!(result, Err(OrchestratorError::StageValidation(_))), "got {result:?}");
+    assert_eq!(h.call_count(), 0, "a rejected override must not spawn anything");
+    assert_eq!(h.persisted("run1").status, RunStatus::AwaitingStageStart, "a rejection is not a transition");
+}
+
+#[tokio::test]
+async fn start_stage_rejects_an_override_for_a_different_stage() {
+    let h = setup();
+    h.orchestrator.start_run("two-stage", h.target(), "run1".to_string()).unwrap();
+
+    let wrong = stage("stage2", "orchestrator_stage2.jsonl", false);
+    let result = h.orchestrator.start_stage("run1", 0, Some(wrong), |_, _| {}).await;
+
+    assert!(
+        matches!(result, Err(OrchestratorError::StageIdMismatch { ref expected, ref got }) if expected == "stage1" && got == "stage2"),
+        "got {result:?}"
+    );
+    assert_eq!(h.call_count(), 0);
+}
+
+#[tokio::test]
+async fn start_stage_applies_a_valid_override_to_resolved_stages_only() {
+    let h = setup_with(no_checkpoint_two_stage_template());
+    h.orchestrator.start_run("no-cp-two-stage", h.target(), "run1".to_string()).unwrap();
+
+    let mut edited = stage("stage1", "orchestrator_stage1.jsonl", false);
+    edited.name = "Renamed by the user".to_string();
+    edited.allowed_tools = vec!["Read".to_string(), "Grep".to_string()];
+    let record = h.orchestrator.start_stage("run1", 0, Some(edited), |_, _| {}).await.unwrap();
+
+    assert_eq!(record.resolved_stages[0].name, "Renamed by the user");
+    assert_eq!(record.resolved_stages[1].name, "Stage stage2", "only the current stage is replaced");
+    let calls = h.calls();
+    assert!(
+        calls[0].windows(2).any(|w| w[0] == "--allowedTools" && w[1] == "Read,Grep"),
+        "the override's allowed tools were actually used: {:?}",
+        calls[0]
+    );
+}
+
+// T-B1 (second half)
+#[tokio::test]
+async fn manifest_is_rewritten_on_each_transition() {
+    let h = setup_with(no_checkpoint_two_stage_template());
+    h.orchestrator.start_run("no-cp-two-stage", h.target(), "run1".to_string()).unwrap();
+    let after_start_run = std::fs::read_to_string(manifest_run_path(h.target_dir.path())).unwrap();
+
+    h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.unwrap();
+    let after_stage_one = std::fs::read_to_string(manifest_run_path(h.target_dir.path())).unwrap();
+
+    assert_ne!(after_start_run, after_stage_one, "the manifest must change on every transition (PRD B-1)");
+    assert!(after_stage_one.contains("\"currentStageIndex\": 1"));
+    assert!(after_stage_one.contains("\"awaiting-start\""));
+}
+
+// T-D4a — mutex + status guard
+#[tokio::test]
+async fn concurrent_start_stage_spawns_only_one_process() {
+    // The two calls race. The winner writes status=Running to disk inside the lock and
+    // releases it *before* spawning; the loser then reads Running and trips guard (i).
+    // The generation guard is never reached here — see T-D4b for that.
+    let h = std::sync::Arc::new(setup_with(no_checkpoint_two_stage_template()));
+    h.orchestrator.start_run("no-cp-two-stage", h.target(), "run1".to_string()).unwrap();
+
+    let a = { let h = h.clone(); tokio::spawn(async move { h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.map(|_| ()) }) };
+    let b = { let h = h.clone(); tokio::spawn(async move { h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.map(|_| ()) }) };
+    let (ra, rb) = (a.await.unwrap(), b.await.unwrap());
+
+    assert_eq!(h.call_count(), 1, "the mutex must prevent a second claude process (PRD D-4)");
+    let failures: Vec<_> = [ra, rb].into_iter().filter_map(Result::err).collect();
+    assert_eq!(failures.len(), 1, "exactly one call is rejected");
+    assert!(
+        matches!(failures[0], OrchestratorError::NotAwaitingStageStart(ref id) if id == "run1"),
+        "got {:?}",
+        failures[0]
+    );
+}
+
+// T-D4b — generation guard, deterministic and sequential
+#[tokio::test]
+async fn stale_stage_index_is_rejected_after_gate_advance() {
+    // A no-checkpoint template with a following stage is the *only* shape that returns
+    // the run to AwaitingStageStart at a different index, which is the one path where
+    // the status guard passes and only the generation guard can reject.
+    let h = setup_with(no_checkpoint_two_stage_template());
+    h.orchestrator.start_run("no-cp-two-stage", h.target(), "run1".to_string()).unwrap();
+
+    let after = h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.unwrap();
+    assert_eq!(after.status, RunStatus::AwaitingStageStart);
+    assert_eq!(after.current_stage_index, 1);
+
+    // A duplicate click / late retry arrives carrying the stale index 0.
+    let result = h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await;
+
+    assert!(
+        matches!(result, Err(OrchestratorError::StaleStageIndex { expected: 0, actual: 1 })),
+        "got {result:?}"
+    );
+    assert_eq!(h.call_count(), 1, "stage 2 must not have been spawned");
+    let persisted = h.persisted("run1");
+    assert_eq!(persisted.status, RunStatus::AwaitingStageStart, "a rejection is not a transition");
+    assert_eq!(persisted.current_stage_index, 1);
+}
+
+// T-A6 replacement for the deleted drive-timeout test (08e9144 precedent)
+#[tokio::test]
+async fn start_stage_marks_run_failed_instead_of_stuck_running_on_timeout() {
+    let h = setup_with_timeout(
+        Template {
+            id: "hang".to_string(),
+            name: "Hang".to_string(),
+            description: "desc".to_string(),
+            stages: vec![stage("stage1", "executor_hang.jsonl", false)],
+        },
+        std::time::Duration::from_millis(100),
+    );
+    h.orchestrator.start_run("hang", h.target(), "run1".to_string()).unwrap();
+
+    // run_current_stage returns Err; start_stage must absorb it, not propagate with `?`.
+    let record = h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.unwrap();
+
+    assert_eq!(record.status, RunStatus::Failed);
+    assert_eq!(record.stages[0].status, StageStatus::Failed);
+    let persisted = h.persisted("run1");
+    assert_eq!(persisted.status, RunStatus::Failed, "the on-disk record must not be stuck at running");
+    assert_eq!(persisted.stages[0].status, StageStatus::Failed);
+}
+
+// GAP-3 decision D1: Failed is terminal.
+#[tokio::test]
+async fn failed_run_rejects_start_stage() {
+    let h = setup_with_timeout(
+        Template {
+            id: "hang2".to_string(),
+            name: "Hang2".to_string(),
+            description: "desc".to_string(),
+            stages: vec![stage("stage1", "executor_hang.jsonl", false), stage("stage2", "orchestrator_stage2.jsonl", false)],
+        },
+        std::time::Duration::from_millis(100),
+    );
+    h.orchestrator.start_run("hang2", h.target(), "run1".to_string()).unwrap();
+    h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.unwrap();
+
+    let result = h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await;
+
+    assert!(matches!(result, Err(OrchestratorError::NotAwaitingStageStart(_))), "got {result:?}");
 }
