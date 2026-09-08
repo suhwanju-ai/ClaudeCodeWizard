@@ -47,8 +47,13 @@ classDiagram
             +RunStatus status
             +usize currentStageIndex
             +StageRun_list stages
+            +Stage_list resolvedStages
             +new(runId templateId targetDir stageIds) RunRecord
             +currentStageMut() StageRun
+            +currentResolvedStage() Stage
+            +applyStageOverride(stage) Result
+            +beginCurrentStage()
+            +advanceToGate(sessionId) bool
             +markCurrentAwaitingCheckpoint(sessionId)
             +markCurrentFailed()
             +approveCurrent() bool
@@ -62,6 +67,7 @@ classDiagram
         }
         class RunStatus {
             Running
+            AwaitingStageStart
             AwaitingCheckpoint
             Completed
             Failed
@@ -69,10 +75,14 @@ classDiagram
         }
         class StageStatus {
             Pending
+            AwaitingStart
             Running
             AwaitingCheckpoint
             Approved
             Failed
+        }
+        class StageOverrideError {
+            StageIdMismatch(expected got)
         }
         class StageEvent {
             Init(sessionId)
@@ -128,18 +138,34 @@ classDiagram
             +TemplateStore templateStore
             +RunRecordStore runStore
             +ExecutorConfig executorConfig
+            -RunLocks runLocks
             +new(templateStore runStore executorConfig) Orchestrator
-            +startRun(templateId targetDir runId onEvent) RunRecord
-            -drive(template record targetDir resumeSessionId onEvent)
+            +startRun(templateId targetDir runId) RunRecord
+            +startStage(runId expectedStageIndex stageOverride onEvent) RunRecord
+            -runCurrentStage(record targetDir resumeSessionId onEvent) RunRecord
             +approveCheckpoint(runId onEvent) RunRecord
             +requestChanges(runId feedback onEvent) RunRecord
             +rejectCheckpoint(runId) RunRecord
+            +cancelRun(runId) RunRecord
+            -save(record)
+            -saveWithRollback(record snapshot)
+            -lockFor(runId) Mutex
         }
         class OrchestratorError {
             TemplateStore(err)
             RunRecordStore(err)
             Io(err)
             NotAwaitingCheckpoint(runId)
+            NotAwaitingStageStart(runId)
+            StageIdMismatch(expected got)
+            StaleStageIndex(expected actual)
+            TargetDirInUse(path)
+            NotCancellable(runId)
+        }
+        class ProjectManifest {
+            +writeProjectManifest(targetDir record)
+            +validateTargetDir(targetDir) Result
+            +manifestDir(targetDir) PathBuf
         }
     }
 
@@ -150,7 +176,10 @@ classDiagram
             +saveTemplate(orchestrator template)
             +deleteTemplate(orchestrator id)
             +checkCli(orchestrator) string
-            +startPipelineRun(app orchestrator templateId targetDir runId) RunRecord
+            +startPipelineRun(orchestrator templateId targetDir runId) RunRecord
+            +startStage(app orchestrator runId expectedStageIndex stageOverride) RunRecord
+            +cancelRun(orchestrator runId) RunRecord
+            +getRun(orchestrator runId) RunRecord
             +approveCheckpoint(app orchestrator runId) RunRecord
             +requestChanges(app orchestrator runId feedback) RunRecord
             +rejectCheckpoint(orchestrator runId) RunRecord
@@ -182,6 +211,8 @@ classDiagram
     Orchestrator --> ExecutorConfig : 사용
     Orchestrator ..> Executor : runStage 호출
     Orchestrator ..> OrchestratorError : 실패 시 반환
+    Orchestrator ..> ProjectManifest : 매 전이마다 씀
+    RunRecord ..> StageOverrideError : applyStageOverride 실패 시 반환
     Executor ..> StageEvent : 파싱 및 emit
     Executor --> ExecutorConfig : 설정 참조
 
@@ -199,7 +230,7 @@ classDiagram
 | `Domain` | `template/mod.rs` | 템플릿/단계 정의와 순수 검증 로직 (`validate_template`). 저장 방식을 모른다 |
 | `Engine_Domain` | `engine/run_record.rs`, `engine/stream_json.rs` | 실행 상태 머신의 데이터 모델과 상태 전이 메서드, `claude` stdout 파싱 결과 타입 |
 | `Store` | `template/store.rs`, `engine/run_record.rs`(저장소 부분) | JSON 파일 CRUD, id 검증(path traversal 방지) |
-| `Engine_Execution` | `engine/executor.rs`, `engine/orchestrator.rs` | `claude` 자식 프로세스 스폰/스트리밍, 체크포인트 상태 머신 드라이버 |
+| `Engine_Execution` | `engine/executor.rs`, `engine/orchestrator.rs`, `engine/project_manifest.rs` | `claude` 자식 프로세스 스폰/스트리밍, 게이트/체크포인트 상태 머신, `<targetDir>` 매니페스트 쓰기 |
 | `Command` | `commands.rs`, `cli_check.rs` | Tauri IPC 진입점 — 위 계층들을 얇게 감싸 `Result<T, String>`으로 변환 |
 
 ## 주요 설계 포인트
@@ -207,9 +238,12 @@ classDiagram
 - **`Orchestrator`가 조합 루트(composition root)** 다 — `TemplateStore`, `RunRecordStore`,
   `ExecutorConfig`를 하나로 묶어 Tauri `State`로 등록된다(`lib.rs`). 커맨드 레이어는
   이 `Orchestrator` 하나만 알면 된다.
-- **`drive()`가 상태 머신의 심장부**다 — 체크포인트가 없는 단계는 자동으로 연쇄
-  실행하고, 체크포인트가 있는 단계 또는 실패/완료 지점에서만 멈춘다. `startRun`,
-  `approveCheckpoint`가 공통으로 이 메서드를 재사용한다.
+- **`Orchestrator`는 더 이상 루프를 돌지 않는다** — 예전의 `drive()`는 제거됐다. `startRun`은
+  1단계의 실행 전 게이트(`AwaitingStageStart`)에서 곧바로 반환하고, `startStage` 호출 1번이
+  단계 1개를 실행한다. 체크포인트가 없는 단계가 끝나도, 체크포인트를 승인해도 결과는
+  같다 — `advanceToGate()`로 다음 단계의 게이트로 돌아갈 뿐 다음 `startStage`가
+  자동으로 이어지지 않는다. run별 락(`lockFor`)이 상태 로드-검사-저장 구간을 직렬화하고,
+  자식 프로세스를 기다리는 동안에는 락을 쥐지 않는다.
 - **검증은 두 레이어에 중복 존재한다** — `TemplateStore.save()`가 호출하는
   `validate_template()`(Rust)과 프론트엔드 `TemplateEditor.tsx`의 `validate()`(TS)가
   같은 규칙(빈 프롬프트 금지, id 패턴, 중복 id 금지)을 각각 구현한다. 백엔드가 최종
