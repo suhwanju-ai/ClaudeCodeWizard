@@ -37,8 +37,8 @@ impl Orchestrator {
         mut on_event: F,
     ) -> Result<RunRecord, OrchestratorError> {
         let template = self.template_store.load(template_id)?;
-        let stage_ids: Vec<String> = template.stages.iter().map(|s| s.id.clone()).collect();
-        let mut record = RunRecord::new(run_id, template.id.clone(), target_dir.to_string_lossy().to_string(), &stage_ids);
+        let mut record =
+            RunRecord::new(run_id, template.id.clone(), target_dir.to_string_lossy().to_string(), &template.stages);
         std::fs::create_dir_all(&target_dir)?;
         // v1 targets newly created folders only; a non-empty target_dir warning would need
         // frontend UI beyond this fix wave's scope (see final-review.md #15), so it's not enforced here.
