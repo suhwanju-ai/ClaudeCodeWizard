@@ -41,9 +41,12 @@ pub fn run() {
             commands::delete_template,
             commands::check_cli,
             commands::start_pipeline_run,
+            commands::start_stage,
             commands::approve_checkpoint,
             commands::request_changes,
             commands::reject_checkpoint,
+            commands::cancel_run,
+            commands::get_run,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

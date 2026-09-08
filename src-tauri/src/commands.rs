@@ -93,3 +93,31 @@ pub async fn request_changes(
 pub fn reject_checkpoint(orchestrator: State<Orchestrator>, run_id: String) -> Result<RunRecord, String> {
     orchestrator.reject_checkpoint(&run_id).map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub async fn start_stage(
+    app: AppHandle,
+    orchestrator: State<'_, Orchestrator>,
+    run_id: String,
+    expected_stage_index: usize,
+    stage_override: Option<crate::template::Stage>,
+) -> Result<RunRecord, String> {
+    orchestrator
+        .start_stage(&run_id, expected_stage_index, stage_override, |stage_id, event| {
+            emit_stage_event(&app, &run_id, stage_id, event);
+        })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn cancel_run(orchestrator: State<Orchestrator>, run_id: String) -> Result<RunRecord, String> {
+    orchestrator.cancel_run(&run_id).map_err(|e| e.to_string())
+}
+
+/// Read-only. The frontend calls this to resynchronize after a STALE_STAGE_INDEX
+/// rejection (TRD 3.10). It changes no state, so it takes no run lock.
+#[tauri::command]
+pub fn get_run(orchestrator: State<Orchestrator>, run_id: String) -> Result<RunRecord, String> {
+    orchestrator.run_store.load(&run_id).map_err(|e| e.to_string())
+}
