@@ -1,9 +1,17 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex};
 
-use crate::template::{store::StoreError as TemplateStoreError, store::TemplateStore, Template};
+use crate::template::{
+    store::StoreError as TemplateStoreError, store::TemplateStore, validate_template, Template,
+    TemplateValidationError,
+};
 
 use super::executor::{run_stage, ExecutorConfig};
-use super::run_record::{RunRecord, RunRecordStore, RunRecordStoreError, RunStatus, StageStatus};
+use super::project_manifest::{manifest_run_path, validate_target_dir, write_project_manifest, TargetDirError};
+use super::run_record::{
+    RunRecord, RunRecordStore, RunRecordStoreError, RunStatus, StageOverrideError, StageStatus,
+};
 use super::stream_json::StageEvent;
 
 #[derive(Debug, thiserror::Error)]
@@ -16,34 +24,113 @@ pub enum OrchestratorError {
     Io(#[from] std::io::Error),
     #[error("run '{0}' is not awaiting a checkpoint")]
     NotAwaitingCheckpoint(String),
+    #[error("run '{0}' is not awaiting a stage start")]
+    NotAwaitingStageStart(String),
+    #[error("stage override id '{got}' does not match resolved stage '{expected}'")]
+    StageIdMismatch { expected: String, got: String },
+    // The literal prefix is the frontend's only way to tell this error apart, because
+    // commands.rs collapses every error to a string (M1). src/api.ts matches on it in
+    // isStaleStageIndexError(); a test pins it so it cannot be edited away.
+    #[error("STALE_STAGE_INDEX: run is at stage {actual}, caller expected {expected}")]
+    StaleStageIndex { expected: usize, actual: usize },
+    #[error(transparent)]
+    StageValidation(#[from] TemplateValidationError),
+    #[error("failed to write project manifest: {0}")]
+    ProjectManifest(String),
+    #[error(transparent)]
+    TargetDir(#[from] TargetDirError),
+    #[error("target dir already contains a pipeline run: {0}")]
+    TargetDirInUse(String),
+    #[error("run '{0}' cannot be cancelled in its current state")]
+    NotCancellable(String),
+}
+
+impl From<StageOverrideError> for OrchestratorError {
+    fn from(e: StageOverrideError) -> Self {
+        match e {
+            StageOverrideError::StageIdMismatch { expected, got } => {
+                OrchestratorError::StageIdMismatch { expected, got }
+            }
+        }
+    }
 }
 
 pub struct Orchestrator {
     pub template_store: TemplateStore,
     pub run_store: RunRecordStore,
     pub executor_config: ExecutorConfig,
+    /// One async mutex per run, serializing the load-check-save window of every
+    /// state-changing entry point (IMP-016). The outer std mutex guards only the map.
+    run_locks: StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Orchestrator {
     pub fn new(template_store: TemplateStore, run_store: RunRecordStore, executor_config: ExecutorConfig) -> Self {
-        Self { template_store, run_store, executor_config }
+        Self { template_store, run_store, executor_config, run_locks: StdMutex::new(HashMap::new()) }
     }
 
-    pub async fn start_run<F: FnMut(&str, StageEvent)>(
+    #[allow(dead_code)]
+    fn lock_for(&self, run_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.run_locks.lock().expect("run_locks mutex poisoned");
+        locks
+            .entry(run_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// The single persistence entry point. Writing the app_data record first keeps
+    /// PRD B-2 true (the manifest is additional, never a replacement); writing the
+    /// manifest on every transition keeps PRD B-1 true.
+    fn save(&self, record: &RunRecord) -> Result<(), OrchestratorError> {
+        self.run_store.save(record)?;
+        let target = PathBuf::from(&record.target_dir);
+        write_project_manifest(&target, record)
+            .map_err(|e| OrchestratorError::ProjectManifest(e.to_string()))
+    }
+
+    /// IMP-015 (decision D5): if the manifest write fails after the app_data record has
+    /// already advanced, put `snapshot` back on disk so the run is left in a state that
+    /// still accepts actions (PRD D-3) instead of stranded mid-transition. A failing
+    /// rollback is logged and the original error is returned.
+    #[allow(dead_code)]
+    fn save_with_rollback(&self, record: &RunRecord, snapshot: &RunRecord) -> Result<(), OrchestratorError> {
+        match self.save(record) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if let Err(rollback_err) = self.run_store.save(snapshot) {
+                    eprintln!(
+                        "run '{}': manifest write failed and the rollback save also failed: {rollback_err}",
+                        record.run_id
+                    );
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Creates the run record and its manifest. Spawns nothing — the first claude
+    /// process appears only when the user calls `start_stage` (PRD A-1).
+    pub fn start_run(
         &self,
         template_id: &str,
         target_dir: PathBuf,
         run_id: String,
-        mut on_event: F,
     ) -> Result<RunRecord, OrchestratorError> {
         let template = self.template_store.load(template_id)?;
-        let mut record =
-            RunRecord::new(run_id, template.id.clone(), target_dir.to_string_lossy().to_string(), &template.stages);
-        std::fs::create_dir_all(&target_dir)?;
-        // v1 targets newly created folders only; a non-empty target_dir warning would need
-        // frontend UI beyond this fix wave's scope (see final-review.md #15), so it's not enforced here.
-        self.drive(&template, &mut record, &target_dir, None, &mut on_event).await?;
-        self.run_store.save(&record)?;
+        validate_template(&template)?;
+        validate_target_dir(&target_dir)?;
+        // IMP-017 (decision D4): the manifest path is fixed per folder, so a second run
+        // here would overwrite the first run's snapshot. Refuse instead (PRD B-3).
+        if manifest_run_path(&target_dir).exists() {
+            return Err(OrchestratorError::TargetDirInUse(target_dir.to_string_lossy().to_string()));
+        }
+        let record = RunRecord::new(
+            run_id,
+            template.id.clone(),
+            target_dir.to_string_lossy().to_string(),
+            &template.stages,
+        );
+        self.save(&record)?;
         Ok(record)
     }
 
