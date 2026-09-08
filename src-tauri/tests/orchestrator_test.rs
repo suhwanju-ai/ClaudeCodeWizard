@@ -54,7 +54,7 @@ fn no_checkpoint_two_stage_template() -> Template {
 
 struct Harness {
     orchestrator: Orchestrator,
-    _template_dir: tempfile::TempDir,
+    template_dir: tempfile::TempDir,
     run_dir: tempfile::TempDir,
     target_dir: tempfile::TempDir,
     dump_dir: tempfile::TempDir,
@@ -107,7 +107,7 @@ fn setup_with_timeout(template: Template, stage_timeout: std::time::Duration) ->
             )],
         },
     );
-    Harness { orchestrator, _template_dir: template_dir, run_dir, target_dir, dump_dir }
+    Harness { orchestrator, template_dir, run_dir, target_dir, dump_dir }
 }
 
 #[allow(dead_code)]
@@ -632,4 +632,63 @@ async fn reject_checkpoint_rejects_a_run_not_awaiting_checkpoint() {
     let result = h.orchestrator.reject_checkpoint("run1");
 
     assert!(matches!(result, Err(OrchestratorError::NotAwaitingCheckpoint(ref id)) if id == "run1"), "got {result:?}");
+}
+
+fn template_file_bytes(h: &Harness, template_id: &str) -> Vec<u8> {
+    // TemplateStore stores one JSON file per template, named by id.
+    let path = h.template_dir.path().join(format!("{template_id}.json"));
+    std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+}
+
+// T-C1
+#[tokio::test]
+async fn full_run_never_writes_the_template_store() {
+    let h = setup_with(no_checkpoint_two_stage_template());
+    let before = template_file_bytes(&h, "no-cp-two-stage");
+
+    h.orchestrator.start_run("no-cp-two-stage", h.target(), "run1".to_string()).unwrap();
+    h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.unwrap();
+    h.orchestrator.start_stage("run1", 1, None, |_, _| {}).await.unwrap();
+
+    assert_eq!(
+        before,
+        template_file_bytes(&h, "no-cp-two-stage"),
+        "a full run must never write the saved template (PRD C-1)"
+    );
+}
+
+// T-C2
+#[tokio::test]
+async fn stage_override_does_not_touch_the_saved_template() {
+    let h = setup_with(no_checkpoint_two_stage_template());
+    let before = template_file_bytes(&h, "no-cp-two-stage");
+
+    h.orchestrator.start_run("no-cp-two-stage", h.target(), "run1".to_string()).unwrap();
+
+    let mut edited = stage("stage1", "orchestrator_stage1.jsonl", false);
+    edited.name = "Edited for this run only".to_string();
+    edited.permission_mode = PermissionMode::BypassPermissions;
+    h.orchestrator.start_stage("run1", 0, Some(edited), |_, _| {}).await.unwrap();
+    let record = h.orchestrator.start_stage("run1", 1, None, |_, _| {}).await.unwrap();
+
+    assert_eq!(record.status, RunStatus::Completed);
+    // The edit is visible in the run...
+    assert_eq!(record.resolved_stages[0].name, "Edited for this run only");
+    // ...and byte-for-byte absent from the template (PRD C-2).
+    assert_eq!(before, template_file_bytes(&h, "no-cp-two-stage"));
+}
+
+#[tokio::test]
+async fn request_changes_does_not_touch_the_saved_template() {
+    let h = setup(); // stage1 checkpoints
+    let before = template_file_bytes(&h, "two-stage");
+
+    h.orchestrator.start_run("two-stage", h.target(), "run1".to_string()).unwrap();
+    h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.unwrap();
+    h.orchestrator
+        .request_changes("run1", &fixture_prompt("orchestrator_feedback.jsonl"), |_, _| {})
+        .await
+        .unwrap();
+
+    assert_eq!(before, template_file_bytes(&h, "two-stage"));
 }
