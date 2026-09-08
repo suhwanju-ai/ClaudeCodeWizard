@@ -6,7 +6,6 @@ import type { Stage, Template } from "../types";
 interface Props {
   initial: Template | null;
   onSaved: (template: Template) => void;
-  onRun: (template: Template) => void;
   onCancel: () => void;
 }
 
@@ -36,7 +35,7 @@ function validate(template: Template): string | null {
   return null;
 }
 
-export default function TemplateEditor({ initial, onSaved, onRun, onCancel }: Props) {
+export default function TemplateEditor({ initial, onSaved, onCancel }: Props) {
   const [template, setTemplate] = useState<Template>(
     initial ?? { id: `template-${Date.now()}`, name: "", description: "", stages: [] }
   );
@@ -88,27 +87,21 @@ export default function TemplateEditor({ initial, onSaved, onRun, onCancel }: Pr
     });
   };
 
-  const persistTemplate = async (): Promise<boolean> => {
-    if (error) return false;
+  // IMP-012 (decision D2): there is deliberately no run path here any more. Keeping a
+  // shared persistTemplate() helper with one caller would just invite the save-then-run
+  // coupling back, so it is folded into the only action the editor still performs.
+  const handleSave = async () => {
+    if (error) return;
     setSaveError(null);
     setBusy(true);
     try {
       await saveTemplate(template);
-      return true;
+      onSaved(template);
     } catch (e) {
       setSaveError(String(e));
-      return false;
     } finally {
       setBusy(false);
     }
-  };
-
-  const handleSave = async () => {
-    if (await persistTemplate()) onSaved(template);
-  };
-
-  const handleRun = async () => {
-    if (await persistTemplate()) onRun(template);
   };
 
   return (
@@ -146,11 +139,8 @@ export default function TemplateEditor({ initial, onSaved, onRun, onCancel }: Pr
           <button className="btn btn-outline" onClick={onCancel}>
             취소
           </button>
-          <button className="btn btn-outline" onClick={handleSave} disabled={!!error || busy}>
+          <button className="btn btn-success" onClick={handleSave} disabled={!!error || busy}>
             저장
-          </button>
-          <button className="btn btn-success" onClick={handleRun} disabled={!!error || busy}>
-            실행
           </button>
         </div>
       </div>

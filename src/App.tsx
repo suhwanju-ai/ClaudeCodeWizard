@@ -66,13 +66,26 @@ export default function App() {
       const targetDir = await open({ directory: true });
       if (!targetDir || Array.isArray(targetDir)) return;
       const runId = crypto.randomUUID();
+      // Optimistic record. It mounts the run screen — and with it the stage-event
+      // listener — before start_pipeline_run answers, so it has to be shaped exactly
+      // like what the backend's RunRecord::new produces: parked at the first stage's
+      // gate with nothing executing (PRD A-1), not "running".
       const pendingRun: RunRecord = {
         runId,
         templateId: template.id,
         targetDir,
-        status: "running",
+        status: "awaiting-stage-start",
         currentStageIndex: 0,
-        stages: template.stages.map((s) => ({ id: s.id, status: "pending", sessionId: null, log: [] })),
+        stages: template.stages.map((s, i) => ({
+          id: s.id,
+          status: i === 0 ? "awaiting-start" : "pending",
+          sessionId: null,
+          log: [],
+        })),
+        // Required on RunRecord — there is no serde default on the Rust side (decision
+        // D8) — and it is what the gate panel renders from, so omitting it would leave
+        // the panel blank until the backend replied.
+        resolvedStages: template.stages,
       };
       setView({ name: "run", run: pendingRun, template });
       const run = await startPipelineRun(template.id, targetDir, runId);
@@ -89,7 +102,6 @@ export default function App() {
       <TemplateEditor
         initial={view.template}
         onSaved={() => setView({ name: "gallery" })}
-        onRun={handleRun}
         onCancel={() => setView({ name: "gallery" })}
       />
     );
@@ -107,6 +119,7 @@ export default function App() {
       <TemplateGallery
         onEdit={(template) => setView({ name: "editor", template })}
         onNew={() => setView({ name: "editor", template: null })}
+        onRun={handleRun}
       />
     );
   }
