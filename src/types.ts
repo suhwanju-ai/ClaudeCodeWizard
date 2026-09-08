@@ -16,8 +16,21 @@ export interface Template {
   stages: Stage[];
 }
 
-export type StageStatus = "pending" | "running" | "awaiting-checkpoint" | "approved" | "failed";
-export type RunStatus = "running" | "awaiting-checkpoint" | "completed" | "failed" | "cancelled";
+export type StageStatus =
+  | "pending"
+  | "awaiting-start"
+  | "running"
+  | "awaiting-checkpoint"
+  | "approved"
+  | "failed";
+
+export type RunStatus =
+  | "running"
+  | "awaiting-stage-start"
+  | "awaiting-checkpoint"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface StageRun {
   id: string;
@@ -33,6 +46,8 @@ export interface RunRecord {
   status: RunStatus;
   currentStageIndex: number;
   stages: StageRun[];
+  /** The run's own copy of the pipeline. Pre-start edits land here, never in the template. */
+  resolvedStages: Stage[];
 }
 
 export type StageEvent =
