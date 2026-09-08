@@ -14,9 +14,18 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir().expect("failed to resolve app data dir");
+            let runs_dir = app_data_dir.join("runs");
+            match engine::legacy_migration::quarantine_legacy_runs(&runs_dir) {
+                Ok(0) => {}
+                Ok(n) => eprintln!(
+                    "moved {n} pre-resolvedStages run record(s) to '{}'",
+                    engine::legacy_migration::LEGACY_DIR_NAME
+                ),
+                Err(e) => eprintln!("failed to quarantine legacy run records: {e}"),
+            }
             let orchestrator = Orchestrator::new(
                 TemplateStore::new(app_data_dir.join("templates")),
-                RunRecordStore::new(app_data_dir.join("runs")),
+                RunRecordStore::new(runs_dir),
                 ExecutorConfig::default(),
             );
             if let Err(e) = template::seed::seed_default_templates(&orchestrator.template_store) {
