@@ -2,12 +2,15 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::template::is_valid_id;
+use crate::template::{is_valid_id, Stage};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum RunStatus {
     Running,
+    /// Parked at a pre-stage edit gate: nothing is executing and the user may
+    /// review/edit the current stage before starting it.
+    AwaitingStageStart,
     AwaitingCheckpoint,
     Completed,
     Failed,
@@ -17,11 +20,20 @@ pub enum RunStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum StageStatus {
+    /// Not reached yet. Meaning unchanged.
     Pending,
+    /// Reached, sitting at its pre-start gate.
+    AwaitingStart,
     Running,
     AwaitingCheckpoint,
     Approved,
     Failed,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum StageOverrideError {
+    #[error("stage override id '{got}' does not match resolved stage '{expected}'")]
+    StageIdMismatch { expected: String, got: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -42,30 +54,61 @@ pub struct RunRecord {
     pub status: RunStatus,
     pub current_stage_index: usize,
     pub stages: Vec<StageRun>,
+    /// The run's own copy of the pipeline. Pre-start edits mutate this and never the
+    /// saved template. Required — there is deliberately no `#[serde(default)]`; legacy
+    /// records are quarantined at startup instead (IMP-018 decision B).
+    pub resolved_stages: Vec<Stage>,
 }
 
 impl RunRecord {
-    pub fn new(run_id: String, template_id: String, target_dir: String, stage_ids: &[String]) -> Self {
+    pub fn new(run_id: String, template_id: String, target_dir: String, stages: &[Stage]) -> Self {
         Self {
             run_id,
             template_id,
             target_dir,
-            status: RunStatus::Running,
+            status: RunStatus::AwaitingStageStart,
             current_stage_index: 0,
-            stages: stage_ids
+            stages: stages
                 .iter()
-                .map(|id| StageRun {
-                    id: id.clone(),
-                    status: StageStatus::Pending,
+                .enumerate()
+                .map(|(i, stage)| StageRun {
+                    id: stage.id.clone(),
+                    status: if i == 0 { StageStatus::AwaitingStart } else { StageStatus::Pending },
                     session_id: None,
                     log: Vec::new(),
                 })
                 .collect(),
+            resolved_stages: stages.to_vec(),
         }
     }
 
     pub fn current_stage_mut(&mut self) -> &mut StageRun {
         &mut self.stages[self.current_stage_index]
+    }
+
+    /// The stage definition this run will actually execute next.
+    pub fn current_resolved_stage(&self) -> &Stage {
+        &self.resolved_stages[self.current_stage_index]
+    }
+
+    /// Replaces the current stage's definition with a user-edited one. The id must match:
+    /// changing it would desynchronize `StageRun.id` from `resolved_stages`.
+    pub fn apply_stage_override(&mut self, stage: Stage) -> Result<(), StageOverrideError> {
+        let expected = &self.resolved_stages[self.current_stage_index].id;
+        if &stage.id != expected {
+            return Err(StageOverrideError::StageIdMismatch {
+                expected: expected.clone(),
+                got: stage.id,
+            });
+        }
+        self.resolved_stages[self.current_stage_index] = stage;
+        Ok(())
+    }
+
+    /// Leaves the gate: the current stage and the run both go to `Running`.
+    pub fn begin_current_stage(&mut self) {
+        self.current_stage_mut().status = StageStatus::Running;
+        self.status = RunStatus::Running;
     }
 
     pub fn mark_current_awaiting_checkpoint(&mut self, session_id: String) {
@@ -79,13 +122,21 @@ impl RunRecord {
         self.status = RunStatus::Failed;
     }
 
-    /// Marks the current stage approved and advances to the next stage.
-    /// Returns `true` if this was the last stage (run is now complete).
+    /// Records the session a finished non-checkpoint stage used, then returns to the
+    /// next stage's gate. Returns `true` if that was the last stage.
+    pub fn advance_to_gate(&mut self, session_id: String) -> bool {
+        self.current_stage_mut().session_id = Some(session_id);
+        self.approve_current()
+    }
+
+    /// Marks the current stage approved and advances to the next stage's *gate*
+    /// (not to `Running` — PRD A-3). Returns `true` if the run is now complete.
     pub fn approve_current(&mut self) -> bool {
         self.current_stage_mut().status = StageStatus::Approved;
         if self.current_stage_index + 1 < self.stages.len() {
             self.current_stage_index += 1;
-            self.status = RunStatus::Running;
+            self.current_stage_mut().status = StageStatus::AwaitingStart;
+            self.status = RunStatus::AwaitingStageStart;
             false
         } else {
             self.status = RunStatus::Completed;
@@ -149,19 +200,141 @@ impl RunRecordStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::template::{PermissionMode, Stage};
+
+    fn stage(id: &str) -> Stage {
+        Stage {
+            id: id.to_string(),
+            name: format!("Stage {id}"),
+            prompt: format!("prompt for {id}"),
+            permission_mode: PermissionMode::AcceptEdits,
+            allowed_tools: vec!["Read".to_string()],
+            checkpoint: true,
+        }
+    }
 
     fn record(stage_ids: &[&str]) -> RunRecord {
-        let ids: Vec<String> = stage_ids.iter().map(|s| s.to_string()).collect();
-        RunRecord::new("run1".to_string(), "tpl1".to_string(), "/tmp/x".to_string(), &ids)
+        let stages: Vec<Stage> = stage_ids.iter().map(|id| stage(id)).collect();
+        RunRecord::new("run1".to_string(), "tpl1".to_string(), "/tmp/x".to_string(), &stages)
+    }
+
+    // U-1
+    #[test]
+    fn new_starts_awaiting_stage_start_with_stage0_awaiting() {
+        let r = record(&["a", "b"]);
+        assert_eq!(r.current_stage_index, 0);
+        assert_eq!(r.status, RunStatus::AwaitingStageStart);
+        assert_eq!(r.stages.len(), 2);
+        assert_eq!(r.stages[0].status, StageStatus::AwaitingStart);
+        assert_eq!(r.stages[1].status, StageStatus::Pending);
+    }
+
+    // U-2
+    #[test]
+    fn new_stores_resolved_stages_copy() {
+        let r = record(&["a", "b"]);
+        assert_eq!(r.resolved_stages.len(), 2);
+        assert_eq!(r.resolved_stages[0], stage("a"));
+        assert_eq!(r.resolved_stages[1], stage("b"));
+    }
+
+    // U-3
+    #[test]
+    fn approve_current_advances_to_awaiting_start_gate() {
+        let mut r = record(&["a", "b"]);
+        let completed = r.approve_current();
+        assert!(!completed);
+        assert_eq!(r.current_stage_index, 1);
+        assert_eq!(r.status, RunStatus::AwaitingStageStart);
+        assert_eq!(r.stages[0].status, StageStatus::Approved);
+        assert_eq!(r.stages[1].status, StageStatus::AwaitingStart);
     }
 
     #[test]
-    fn new_starts_at_stage_zero_with_pending_stages() {
-        let r = record(&["a", "b"]);
-        assert_eq!(r.current_stage_index, 0);
+    fn approve_current_on_last_stage_completes_run() {
+        let mut r = record(&["a"]);
+        assert!(r.approve_current());
+        assert_eq!(r.status, RunStatus::Completed);
+        assert_eq!(r.stages[0].status, StageStatus::Approved);
+    }
+
+    // U-4
+    #[test]
+    fn apply_stage_override_replaces_only_current_index() {
+        let mut r = record(&["a", "b"]);
+        let mut edited = stage("a");
+        edited.prompt = "edited prompt".to_string();
+        edited.checkpoint = false;
+
+        r.apply_stage_override(edited.clone()).unwrap();
+
+        assert_eq!(r.resolved_stages[0], edited);
+        assert_eq!(r.resolved_stages[1], stage("b"));
+    }
+
+    // U-5
+    #[test]
+    fn apply_stage_override_rejects_id_mismatch() {
+        let mut r = record(&["a", "b"]);
+        let result = r.apply_stage_override(stage("b"));
+        assert_eq!(
+            result,
+            Err(StageOverrideError::StageIdMismatch { expected: "a".to_string(), got: "b".to_string() })
+        );
+        assert_eq!(r.resolved_stages[0], stage("a"));
+    }
+
+    // U-6
+    #[test]
+    fn begin_current_stage_sets_running_on_stage_and_run() {
+        let mut r = record(&["a", "b"]);
+        r.begin_current_stage();
         assert_eq!(r.status, RunStatus::Running);
-        assert_eq!(r.stages.len(), 2);
-        assert!(r.stages.iter().all(|s| s.status == StageStatus::Pending));
+        assert_eq!(r.stages[0].status, StageStatus::Running);
+        assert_eq!(r.stages[1].status, StageStatus::Pending);
+    }
+
+    #[test]
+    fn advance_to_gate_records_session_and_returns_to_the_gate() {
+        let mut r = record(&["a", "b"]);
+        r.begin_current_stage();
+        let completed = r.advance_to_gate("sess-a".to_string());
+        assert!(!completed);
+        assert_eq!(r.stages[0].status, StageStatus::Approved);
+        assert_eq!(r.stages[0].session_id, Some("sess-a".to_string()));
+        assert_eq!(r.stages[1].status, StageStatus::AwaitingStart);
+        assert_eq!(r.status, RunStatus::AwaitingStageStart);
+        assert_eq!(r.current_stage_index, 1);
+    }
+
+    #[test]
+    fn advance_to_gate_on_last_stage_completes_run() {
+        let mut r = record(&["a"]);
+        assert!(r.advance_to_gate("sess-a".to_string()));
+        assert_eq!(r.status, RunStatus::Completed);
+        assert_eq!(r.stages[0].session_id, Some("sess-a".to_string()));
+    }
+
+    #[test]
+    fn current_resolved_stage_follows_the_index() {
+        let mut r = record(&["a", "b"]);
+        assert_eq!(r.current_resolved_stage().id, "a");
+        r.approve_current();
+        assert_eq!(r.current_resolved_stage().id, "b");
+    }
+
+    // U-7
+    #[test]
+    fn serializes_new_statuses_as_kebab_case() {
+        assert_eq!(serde_json::to_string(&RunStatus::AwaitingStageStart).unwrap(), "\"awaiting-stage-start\"");
+        assert_eq!(serde_json::to_string(&StageStatus::AwaitingStart).unwrap(), "\"awaiting-start\"");
+    }
+
+    #[test]
+    fn serializes_resolved_stages_under_a_camel_case_key() {
+        let json = serde_json::to_value(record(&["a"])).unwrap();
+        assert!(json.get("resolvedStages").is_some(), "expected a resolvedStages key, got {json}");
+        assert_eq!(json["resolvedStages"].as_array().unwrap().len(), 1);
     }
 
     #[test]
@@ -179,24 +352,6 @@ mod tests {
         r.mark_current_failed();
         assert_eq!(r.status, RunStatus::Failed);
         assert_eq!(r.stages[0].status, StageStatus::Failed);
-    }
-
-    #[test]
-    fn approve_current_advances_to_next_stage() {
-        let mut r = record(&["a", "b"]);
-        let completed = r.approve_current();
-        assert!(!completed);
-        assert_eq!(r.current_stage_index, 1);
-        assert_eq!(r.status, RunStatus::Running);
-        assert_eq!(r.stages[0].status, StageStatus::Approved);
-    }
-
-    #[test]
-    fn approve_current_on_last_stage_completes_run() {
-        let mut r = record(&["a"]);
-        let completed = r.approve_current();
-        assert!(completed);
-        assert_eq!(r.status, RunStatus::Completed);
     }
 
     #[test]

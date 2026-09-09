@@ -5,9 +5,15 @@ import type { Template } from "../types";
 interface Props {
   onEdit: (template: Template) => void;
   onNew: () => void;
+  /**
+   * IMP-012 (decision D2). Running starts here again, from the saved template — the
+   * editor no longer runs anything, so pressing 실행 can never overwrite what it runs.
+   * Per-run edits happen at the run screen's pre-stage gate instead.
+   */
+  onRun: (template: Template) => void;
 }
 
-export default function TemplateGallery({ onEdit, onNew }: Props) {
+export default function TemplateGallery({ onEdit, onNew, onRun }: Props) {
   const [templates, setTemplates] = useState<Template[]>([]);
   const [cliStatus, setCliStatus] = useState<string>("available");
   const [error, setError] = useState<string | null>(null);
@@ -50,7 +56,9 @@ export default function TemplateGallery({ onEdit, onNew }: Props) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22 }}>
         <div>
           <h1 className="page-title">템플릿 갤러리</h1>
-          <p className="page-subtitle">템플릿을 편집한 뒤, 편집 화면의 실행 버튼으로 새 프로젝트 폴더에 실행합니다.</p>
+          <p className="page-subtitle">
+            템플릿을 실행하면 각 단계가 실행 직전에 멈춥니다 — 그 자리에서 확인·수정한 뒤 실행하세요.
+          </p>
         </div>
         <button className="btn btn-primary" onClick={onNew}>
           새 템플릿
@@ -92,6 +100,9 @@ export default function TemplateGallery({ onEdit, onNew }: Props) {
                 paddingTop: 12,
               }}
             >
+              <button className="btn btn-success" onClick={() => onRun(template)}>
+                실행
+              </button>
               <button className="btn btn-success-subtle" onClick={() => onEdit(template)}>
                 편집
               </button>

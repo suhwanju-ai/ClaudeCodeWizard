@@ -150,3 +150,39 @@ async fn omits_allowed_tools_flag_when_empty() {
     let dumped = fs::read_to_string(&dump_path).unwrap();
     assert!(!dumped.lines().any(|a| a == "--allowedTools"));
 }
+
+#[tokio::test]
+async fn dump_dir_records_one_file_per_invocation() {
+    let target = tempfile::tempdir().unwrap();
+    let dump_dir = tempfile::tempdir().unwrap();
+    let config = ExecutorConfig {
+        claude_binary: env!("CARGO_BIN_EXE_mock_claude").to_string(),
+        stage_timeout: std::time::Duration::from_secs(30),
+        extra_env: vec![(
+            "MOCK_CLAUDE_DUMP_DIR".to_string(),
+            dump_dir.path().to_string_lossy().to_string(),
+        )],
+    };
+    let fixture = fixture_path("executor_success.jsonl");
+    let prompt = format!("FIXTURE:{}", fixture.to_string_lossy());
+    let stage = Stage {
+        id: "s1".to_string(),
+        name: "S1".to_string(),
+        prompt,
+        permission_mode: PermissionMode::AcceptEdits,
+        allowed_tools: vec![],
+        checkpoint: false,
+    };
+
+    run_stage(&config, &stage, target.path(), None, |_| {}).await.unwrap();
+    run_stage(&config, &stage, target.path(), Some("sess-1"), |_| {}).await.unwrap();
+
+    let mut files: Vec<_> = std::fs::read_dir(dump_dir.path()).unwrap().map(|e| e.unwrap().path()).collect();
+    files.sort();
+
+    assert_eq!(files.len(), 2, "expected one dump file per invocation");
+    let first = std::fs::read_to_string(&files[0]).unwrap();
+    let second = std::fs::read_to_string(&files[1]).unwrap();
+    assert!(!first.contains("--resume"), "first call had no resume session: {first}");
+    assert!(second.contains("--resume\nsess-1"), "second call should carry --resume sess-1: {second}");
+}

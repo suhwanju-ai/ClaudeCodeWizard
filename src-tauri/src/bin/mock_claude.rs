@@ -9,6 +9,18 @@ fn main() {
         let _ = fs::write(dump_path, args.join("\n"));
     }
 
+    // One file per invocation, so a test can count spawns and inspect each call's argv.
+    // The zero-padded nanosecond stamp makes lexicographic filename order chronological.
+    if let Ok(dump_dir) = env::var("MOCK_CLAUDE_DUMP_DIR") {
+        let _ = fs::create_dir_all(&dump_dir);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let name = format!("call-{stamp:020}-{}.txt", std::process::id());
+        let _ = fs::write(std::path::Path::new(&dump_dir).join(name), args.join("\n"));
+    }
+
     if args.iter().any(|a| a == "--version") {
         println!("mock-claude 0.0.1");
         exit(0);

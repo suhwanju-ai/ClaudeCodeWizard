@@ -50,6 +50,18 @@ pub(crate) fn is_valid_id(id: &str) -> bool {
         && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
+/// Validates a single stage in isolation: id charset first, then a non-blank prompt.
+/// Template-level rules (at least one stage, unique stage ids) stay in `validate_template`.
+pub fn validate_stage(stage: &Stage) -> Result<(), TemplateValidationError> {
+    if !is_valid_id(&stage.id) {
+        return Err(TemplateValidationError::InvalidId(stage.id.clone()));
+    }
+    if stage.prompt.trim().is_empty() {
+        return Err(TemplateValidationError::EmptyPrompt(stage.id.clone()));
+    }
+    Ok(())
+}
+
 pub fn validate_template(template: &Template) -> Result<(), TemplateValidationError> {
     if !is_valid_id(&template.id) {
         return Err(TemplateValidationError::InvalidId(template.id.clone()));
@@ -59,12 +71,7 @@ pub fn validate_template(template: &Template) -> Result<(), TemplateValidationEr
     }
     let mut seen = std::collections::HashSet::new();
     for stage in &template.stages {
-        if !is_valid_id(&stage.id) {
-            return Err(TemplateValidationError::InvalidId(stage.id.clone()));
-        }
-        if stage.prompt.trim().is_empty() {
-            return Err(TemplateValidationError::EmptyPrompt(stage.id.clone()));
-        }
+        validate_stage(stage)?;
         if !seen.insert(stage.id.clone()) {
             return Err(TemplateValidationError::DuplicateStageId(stage.id.clone()));
         }
@@ -157,5 +164,36 @@ mod tests {
     fn serializes_permission_mode_as_camel_case() {
         let json = serde_json::to_string(&PermissionMode::AcceptEdits).unwrap();
         assert_eq!(json, "\"acceptEdits\"");
+    }
+
+    #[test]
+    fn validate_stage_accepts_valid_stage() {
+        assert_eq!(validate_stage(&stage("s1", "do it")), Ok(()));
+    }
+
+    #[test]
+    fn validate_stage_rejects_empty_prompt() {
+        assert_eq!(
+            validate_stage(&stage("s1", "   ")),
+            Err(TemplateValidationError::EmptyPrompt("s1".to_string()))
+        );
+    }
+
+    #[test]
+    fn validate_stage_rejects_invalid_id() {
+        assert_eq!(
+            validate_stage(&stage("../bad", "do it")),
+            Err(TemplateValidationError::InvalidId("../bad".to_string()))
+        );
+    }
+
+    #[test]
+    fn validate_stage_checks_id_before_prompt() {
+        // validate_template reports InvalidId before EmptyPrompt for the same stage;
+        // the extracted helper must preserve that order (PRD F-1).
+        assert_eq!(
+            validate_stage(&stage("../bad", "")),
+            Err(TemplateValidationError::InvalidId("../bad".to_string()))
+        );
     }
 }

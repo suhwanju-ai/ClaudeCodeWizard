@@ -75,6 +75,11 @@ JS 쪽 Promise로 매핑한다.
 | `StoreError::InvalidId` | 위와 동일 패턴 | path traversal 방지용 사전 검증 |
 | `RunRecordStoreError::NotFound` | `"run '{id}' not found"` | 존재하지 않는 `run_id` 조회 |
 | `OrchestratorError::NotAwaitingCheckpoint` | `"run '{id}' is not awaiting a checkpoint"` | 체크포인트 대기 중이 아닌 런에 승인/거부/수정요청 시도 |
+| `OrchestratorError::NotAwaitingStageStart` | `"run '{id}' is not awaiting a stage start"` | 게이트에 있지 않은 run에 `start_stage` 호출 |
+| `OrchestratorError::StaleStageIndex` | `"STALE_STAGE_INDEX: run is at stage {actual}, caller expected {expected}"` | 이미 지나간 게이트를 대상으로 한 `start_stage` 호출. **접두사가 계약이다** — 프론트엔드는 이 문자열로만 이 에러를 구분하고, `get_run`으로 조용히 재동기화한다 |
+| `OrchestratorError::StageIdMismatch` | `"stage override id '{got}' does not match resolved stage '{expected}'"` | `stageOverride.id`가 현재 단계 id와 다름 |
+| `OrchestratorError::TargetDirInUse` | `"target dir already contains a pipeline run: {path}"` | 이미 `.claude-pipeline-wizard/run.json`이 있는 폴더로 새 실행 시도 |
+| `OrchestratorError::NotCancellable` | `"run '{id}' cannot be cancelled in its current state"` | 이미 종료된 run에 `cancel_run` 호출 |
 | I/O 계열 | `"io error: ..."` | 디스크 읽기/쓰기 실패 |
 | JSON 계열 | `"json error: ..."` | 저장된 JSON 파일 파싱 실패(손상) |
 | `claude` 프로세스 실패 | `StageEvent::ProcessError { exitCode, stderr }` (이벤트로 전달, `Result` 반환값 아님) | CLI 비정상 종료, 타임아웃(30분), stdout 읽기 실패 |
@@ -223,41 +228,102 @@ invoke("start_pipeline_run", {
 | `targetDir` | string | 파이프라인이 실행될 대상 폴더(절대 경로). 존재하지 않으면 생성됨 |
 | `runId` | string | 프론트엔드에서 미리 생성한 실행 id(`crypto.randomUUID()`) — `runs/{runId}.json`으로 저장 |
 
-**동작**: 템플릿을 로드해 첫 번째 단계부터 `claude` CLI를 스폰하고, 단계에 `checkpoint: true`가
-설정된 첫 지점(또는 실패, 또는 마지막 단계 완료)까지 자동으로 진행한다. 각 단계 이벤트는
-`pipeline://stage-event`로 실시간 emit된다(5절 참고).
+**동작**: 템플릿을 로드·검증하고 `targetDir`을 검증(절대 경로 요구, 없으면 생성)한 뒤
+`RunRecord`를 만들어 `runs/{runId}.json`과 `<targetDir>/.claude-pipeline-wizard/`에
+저장하고 반환한다. **어떤 `claude` 프로세스도 스폰하지 않으며**, run은 1단계의 실행 전
+게이트에서 멈춘다. 실제 실행은 `start_stage`가 담당한다.
 
-**성공 응답**: `RunRecord` (아래 구조, → [ER 다이어그램](er-diagram.md) 참고)
+**성공 응답**: `RunRecord`
 ```json
 {
   "runId": "b3f1...",
   "templateId": "web-app-dev",
   "targetDir": "/Users/me/projects/my-new-app",
-  "status": "awaiting-checkpoint",
+  "status": "awaiting-stage-start",
   "currentStageIndex": 0,
   "stages": [
-    { "id": "requirements", "status": "awaiting-checkpoint", "sessionId": "sess-abc", "log": [ /* StageEvent[] */ ] },
+    { "id": "requirements", "status": "awaiting-start", "sessionId": null, "log": [] },
     { "id": "design", "status": "pending", "sessionId": null, "log": [] }
-  ]
+  ],
+  "resolvedStages": [ /* Stage[] — 이 run이 실행할 단계 정의의 사본 */ ]
 }
 ```
 
-**에러**: 템플릿을 찾을 수 없음, 대상 폴더 생성 실패(`io error`) 등.
-> v1 제약: 이미 실행 기록이 있는 폴더에 대한 중복 실행 방지는 프론트엔드/백엔드
-> 어디에도 구현돼 있지 않다(→ [사용 설명서](user-guide.md)의 알려진 제약 참고).
+**에러**: 템플릿을 찾을 수 없음, 상대 경로 `targetDir`, 폴더 생성 실패(`io error`),
+매니페스트 쓰기 실패, 그리고 이미 실행 기록이 있는 폴더(`target dir already contains a
+pipeline run`).
 
 ---
 
-#### `approve_checkpoint` — 체크포인트 승인, 다음 단계로 진행 (비동기)
+#### `start_stage` — 게이트에 멈춘 단계를 하나 실행 (비동기)
+
+**요청**
+```ts
+invoke("start_stage", {
+  runId: "b3f1...",
+  expectedStageIndex: 0,
+  stageOverride: { id: "requirements", name: "요구사항", prompt: "이번엔 이렇게", permissionMode: "acceptEdits", allowedTools: ["Read"], checkpoint: true }
+})
+```
+
+| 파라미터 | 타입 | 설명 |
+|---|---|---|
+| `runId` | string | 대상 실행 id |
+| `expectedStageIndex` | number | **세대(generation) 가드.** 호출자가 화면에 렌더한 바로 그 `currentStageIndex`. run이 이미 다음 게이트로 넘어갔다면 `STALE_STAGE_INDEX:` 에러로 거부된다 |
+| `stageOverride` | `Stage \| null` | 이 실행에만 적용할 단계 정의. `id`는 현재 단계와 같아야 하며, 통과하면 `resolvedStages`의 해당 인덱스를 교체한다. `null`이면 현재 `resolvedStages` 값을 그대로 쓴다 |
+
+**동작**: run별 뮤텍스 안에서 상태·세대·단계 유효성을 검사하고 `RunRecord`를 `running`으로
+전이시켜 저장한 뒤, **락을 놓고** `claude` 프로세스를 정확히 하나 스폰한다. 종료 후 결과에
+따라 `awaiting-checkpoint` / 다음 게이트(`awaiting-stage-start`) / `completed` / `failed`로
+전이한다. **원본 템플릿 파일은 어떤 경우에도 쓰지 않는다.**
+
+**성공 응답**: 갱신된 `RunRecord`
+
+---
+
+#### `cancel_run` — 실행 취소 (동기)
+
+**요청**
+```ts
+invoke("cancel_run", { runId: "b3f1..." })
+```
+
+**동작**: `claude` 프로세스를 실행하지 않고 run 상태를 `cancelled`로 표시해 두 저장소에
+저장한다. 게이트나 체크포인트에서 언제든 호출할 수 있어, 사용자가 어느 지점에서도
+빠져나올 수 있게 한다.
+
+**성공 응답**: 갱신된 `RunRecord` (`status: "cancelled"`)
+**에러**: 이미 종료된 run이면 `"run '{id}' cannot be cancelled in its current state"`.
+
+---
+
+#### `get_run` — 실행 기록 단건 조회 (동기, 읽기 전용)
+
+**요청**
+```ts
+invoke("get_run", { runId: "b3f1..." })
+```
+
+**동작**: `runs/{runId}.json`을 읽어 그대로 반환한다. 상태를 바꾸지 않으므로 run 락을 잡지
+않는다. 프론트엔드는 `STALE_STAGE_INDEX:` 거부를 받은 직후 이 커맨드로 화면을 조용히
+재동기화한다.
+
+**성공 응답**: `RunRecord`
+**에러**: `"run '{id}' not found"`.
+
+---
+
+#### `approve_checkpoint` — 체크포인트 승인, 다음 게이트로 이동 (동기)
 
 **요청**
 ```ts
 invoke("approve_checkpoint", { runId: "b3f1..." })
 ```
 
-**동작**: 현재 단계를 `approved`로 표시하고, 마지막 단계가 아니면 다음 단계를
-`--resume {이전 session_id}`로 이어서 실행한다. 마지막 단계였다면 런 상태를
-`completed`로 전환한다.
+**동작**: 현재 단계를 `approved`로 표시한다. **여기서 다음 단계의 `claude` 프로세스를
+스폰하지 않는다** — 마지막 단계가 아니면 run은 다음 단계의 실행 전 게이트
+(`awaiting-stage-start`)로 돌아가고, 실제 실행은 이어지는 `start_stage` 호출이 담당한다.
+마지막 단계였다면 런 상태를 `completed`로 전환한다.
 
 **성공 응답**: 갱신된 `RunRecord`
 

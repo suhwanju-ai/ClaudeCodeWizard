@@ -97,30 +97,57 @@ try {
 
 ### 시나리오 3 — 파이프라인 실행 + 실시간 로그 구독 (End-to-End)
 
+`start_pipeline_run`은 프로세스를 하나도 스폰하지 않는다 — run을 만들고 1단계의 실행 전
+게이트에서 즉시 반환한다. 실제 실행은 게이트마다 `startStage`를 별도로 호출해야 하며,
+그 호출은 `run.currentStageIndex`를 **세대 가드**로 그대로 넘겨야 한다. 이 두 호출을
+반복하는 것이 v1의 실행 흐름 전체다.
+
 ```ts
 import { open } from "@tauri-apps/plugin-dialog";
-import { startPipelineRun, onStageEvent } from "./api";
+import { startPipelineRun, startStage, onStageEvent, isStaleStageIndexError, getRun } from "./api";
+import type { RunRecord } from "./types";
 
 const targetDir = await open({ directory: true });
 if (!targetDir || Array.isArray(targetDir)) throw new Error("폴더를 선택하세요");
 
 const runId = crypto.randomUUID();
 
-// 1) 이벤트 구독을 먼저 건다 (start_pipeline_run이 즉시 이벤트를 emit하기 시작하므로)
+// 1) 이벤트 구독을 먼저 건다
 const unlisten = await onStageEvent((payload) => {
   if (payload.runId !== runId) return;
   console.log(`[${payload.stageId}]`, payload.event);
 });
 
-// 2) 파이프라인 시작 — 첫 체크포인트(또는 실패/완료)까지 자동 진행 후 resolve
-const run = await startPipelineRun("web-app-dev", targetDir, runId);
-console.log(run.status); // "awaiting-checkpoint" | "completed" | "failed"
+// 2) run 생성 — 아무 프로세스도 뜨지 않는다. 1단계의 실행 전 게이트에서 멈춘다.
+let run: RunRecord = await startPipelineRun("web-app-dev", targetDir, runId);
+console.log(run.status); // "awaiting-stage-start"
+
+// 3) 게이트마다 startStage를 호출하며 종료 상태(completed/failed/cancelled)까지 반복한다.
+const TERMINAL = new Set(["completed", "failed", "cancelled"]);
+while (!TERMINAL.has(run.status)) {
+  if (run.status === "awaiting-stage-start") {
+    try {
+      // editedStage는 사용자가 게이트 패널에서 고친 값(또는 undefined = 수정 없음)
+      run = await startStage(run.runId, run.currentStageIndex, undefined);
+    } catch (e) {
+      if (isStaleStageIndexError(e)) {
+        // 화면이 보던 게이트가 이미 지나갔다 — 재동기화만 하고 사용자에게 다시 확인받는다.
+        run = await getRun(run.runId);
+        continue;
+      }
+      throw e;
+    }
+  } else if (run.status === "awaiting-checkpoint") {
+    // 시나리오 4 참고 — 승인/수정요청/거부 중 하나를 호출해야 여기서 벗어난다.
+    break;
+  }
+}
 
 // 화면을 벗어날 때 반드시 해제
 unlisten();
 ```
 
-실제 구현: `src/App.tsx`의 `handleRun`, `src/pages/PipelineRun.tsx`의 `useEffect`.
+실제 구현: `src/App.tsx`의 `handleRun`, `src/pages/PipelineRun.tsx`의 게이트/체크포인트 렌더 분기.
 
 ### 시나리오 4 — 체크포인트 승인 / 수정 요청 / 거부
 
@@ -180,7 +207,28 @@ if (status === "not-found") {
 ## 4. SDK / 클라이언트 라이브러리
 
 별도의 SDK는 없다. 클라이언트 쪽 유일한 통합 지점은 `src/api.ts`이며, 이 파일 자체가
-"SDK" 역할을 한다. 새로운 커맨드를 백엔드에 추가했다면:
+"SDK" 역할을 한다.
+
+### 4.1 래퍼 함수 ↔ 커맨드 대응표
+
+| `src/api.ts` 함수 | Tauri 커맨드 | 설명 |
+|---|---|---|
+| `listTemplates()` | `list_templates` | 템플릿 전체 목록 |
+| `loadTemplate(id)` | `load_template` | 템플릿 단건 조회 |
+| `saveTemplate(template)` | `save_template` | 템플릿 생성/수정(upsert) |
+| `deleteTemplate(id)` | `delete_template` | 템플릿 삭제 |
+| `checkCli()` | `check_cli` | `claude` CLI 설치 여부 |
+| `startPipelineRun(templateId, targetDir, runId)` | `start_pipeline_run` | run 생성. **프로세스를 스폰하지 않는다** — 1단계 실행 전 게이트에서 반환 |
+| `startStage(runId, expectedStageIndex, stageOverride?)` | `start_stage` | 게이트에 멈춘 단계 하나를 실행. 두 번째 인자는 선택이 아니라 **세대 가드**이므로 화면이 렌더한 인덱스를 그대로 넘겨야 한다 |
+| `cancelRun(runId)` | `cancel_run` | 실행을 `cancelled`로 종료 |
+| `getRun(runId)` | `get_run` | 읽기 전용 재조회 |
+| `isStaleStageIndexError(error)` | — | `startStage` 거부가 세대 불일치인지 판별하는 유일한 지점. 참이면 에러를 띄우지 말고 `getRun`으로 화면을 갱신한다 |
+| `approveCheckpoint(runId)` | `approve_checkpoint` | 체크포인트 승인 — 다음 단계의 실행 전 게이트로 이동(프로세스는 뜨지 않음) |
+| `requestChanges(runId, feedback)` | `request_changes` | 피드백 텍스트로 같은 단계 재실행 |
+| `rejectCheckpoint(runId)` | `reject_checkpoint` | 체크포인트에서 런 취소 |
+| `onStageEvent(handler)` | `pipeline://stage-event`(구독) | 실시간 스테이지 이벤트 리스너 등록 |
+
+새로운 커맨드를 백엔드에 추가했다면:
 
 1. `src-tauri/src/commands.rs`에 `#[tauri::command]` 함수 추가
 2. `src-tauri/src/lib.rs`의 `tauri::generate_handler![...]` 목록에 등록

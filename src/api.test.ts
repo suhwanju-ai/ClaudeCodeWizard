@@ -16,8 +16,12 @@ import {
   requestChanges,
   rejectCheckpoint,
   onStageEvent,
+  startStage,
+  cancelRun,
+  getRun,
+  isStaleStageIndexError,
 } from "./api";
-import type { Template } from "./types";
+import type { Stage, Template } from "./types";
 
 const invokeMock = vi.mocked(invoke);
 const listenMock = vi.mocked(listen);
@@ -99,5 +103,54 @@ describe("api wrapper", () => {
     });
     await onStageEvent(handler);
     expect(handler).toHaveBeenCalledWith({ runId: "run1", stageId: "s1", event: { kind: "init", sessionId: "sess1" } });
+  });
+
+  it("startStage invokes start_stage with runId, expectedStageIndex, and the override", async () => {
+    invokeMock.mockResolvedValue({});
+    const stage: Stage = {
+      id: "s1",
+      name: "요구사항",
+      prompt: "PRD 작성",
+      permissionMode: "acceptEdits",
+      allowedTools: ["Read"],
+      checkpoint: true,
+    };
+    await startStage("run1", 2, stage);
+    expect(invokeMock).toHaveBeenCalledWith("start_stage", {
+      runId: "run1",
+      expectedStageIndex: 2,
+      stageOverride: stage,
+    });
+  });
+
+  it("startStage sends null rather than undefined when no override is given", async () => {
+    invokeMock.mockResolvedValue({});
+    await startStage("run1", 0);
+    expect(invokeMock).toHaveBeenCalledWith("start_stage", {
+      runId: "run1",
+      expectedStageIndex: 0,
+      stageOverride: null,
+    });
+  });
+
+  it("cancelRun invokes cancel_run with runId", async () => {
+    invokeMock.mockResolvedValue({});
+    await cancelRun("run1");
+    expect(invokeMock).toHaveBeenCalledWith("cancel_run", { runId: "run1" });
+  });
+
+  it("getRun invokes get_run with runId", async () => {
+    invokeMock.mockResolvedValue({});
+    await getRun("run1");
+    expect(invokeMock).toHaveBeenCalledWith("get_run", { runId: "run1" });
+  });
+
+  it("isStaleStageIndexError recognizes the backend prefix in every shape it can arrive in", () => {
+    // Tauri rejects with the raw string; a caller may also wrap it in an Error.
+    expect(isStaleStageIndexError("STALE_STAGE_INDEX: run is at stage 1, caller expected 0")).toBe(true);
+    expect(isStaleStageIndexError(new Error("STALE_STAGE_INDEX: run is at stage 1, caller expected 0"))).toBe(true);
+    expect(isStaleStageIndexError("run 'run1' is not awaiting a stage start")).toBe(false);
+    expect(isStaleStageIndexError(null)).toBe(false);
+    expect(isStaleStageIndexError(undefined)).toBe(false);
   });
 });

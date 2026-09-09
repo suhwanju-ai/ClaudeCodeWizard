@@ -29,23 +29,30 @@ erDiagram
         string run_id PK "파일명 runs/{run_id}.json"
         string template_id FK "소프트 참조, DB 제약 없음"
         string target_dir "파이프라인 실행 대상 절대 경로"
-        string status "running/awaiting-checkpoint/completed/failed/cancelled"
-        int current_stage_index "현재 진행 중인 단계 배열 인덱스"
+        string status "running/awaiting-stage-start/awaiting-checkpoint/completed/failed/cancelled"
+        int current_stage_index "현재 게이트에 있거나 실행 중인 단계 배열 인덱스"
+        Stage[] resolvedStages "이 run 전용 파이프라인 사본"
     }
 
     STAGE_RUN {
         string id PK "소속 RunRecord 내에서 유일"
         string run_id FK "내장 배열이므로 실제 컬럼은 아님 - 소속 관계 표현용"
         string stage_id FK "소프트 참조 - Template.stages 원본 STAGE.id, 이름 표시에만 사용"
-        string status "pending/running/awaiting-checkpoint/approved/failed"
+        string status "pending/awaiting-start/running/awaiting-checkpoint/approved/failed"
         string session_id "claude --resume 세션 id, 최초 실행 전 null"
         string log "StageEvent JSON 배열, append-only"
+    }
+
+    PROJECT_MANIFEST {
+        string run_json "run.json - RunRecord 전체, runs/{run_id}.json과 동일 내용"
+        string pipeline_json "pipeline.json - Template 형태 스냅샷, stages = resolvedStages"
     }
 
     TEMPLATE ||--o{ STAGE : "정의한다 (내장 배열)"
     RUN_RECORD ||--o{ STAGE_RUN : "생성한다 (내장 배열, 템플릿 단계 수만큼)"
     TEMPLATE ||--o{ RUN_RECORD : "실행된다 (소프트 참조, 무결성 강제 없음)"
     STAGE ||--o| STAGE_RUN : "실행 기록을 남긴다 (id로만 대응, 무결성 강제 없음)"
+    RUN_RECORD ||--|| PROJECT_MANIFEST : "매 전이마다 미러링"
 ```
 
 ## 표기 설명
@@ -71,3 +78,12 @@ erDiagram
 4. **STAGE ||--o| STAGE_RUN** — `StageRun.id`가 원본 `Stage.id`와 문자열이 같을 때만
    같은 단계로 간주된다. 이 매칭은 프론트엔드의 표시 이름 조회(`stageNameById`)에만
    쓰이고, 백엔드 로직은 인덱스(`currentStageIndex`)로 단계를 진행시킨다.
+5. **RUN_RECORD ||--|| PROJECT_MANIFEST** — `Orchestrator::save()`가 모든 상태 전이마다
+   `runs/{run_id}.json`을 쓴 직후 `<targetDir>/.claude-pipeline-wizard/`에도 같은
+   `RunRecord`를 미러링한다. 매니페스트 쓰기가 실패하면 방금 쓴 `runs/`쪽 전이까지
+   롤백된다(→ [DB 설계 문서](database-design.md) 2.3절).
+6. **RunRecord.resolvedStages는 Template.stages에서 복사된다** — `RunRecord::new()`가
+   생성 시점에 템플릿 `stages`를 통째로 복사하고, 그 뒤로는 원본과 독립적으로 변한다.
+   실행 전 게이트에서 프롬프트를 고쳐도 `apply_stage_override`가 이 복사본 한 인덱스만
+   교체할 뿐이며, 원본 `templates/{id}.json`은 어떤 경로로도 쓰지 않는다 — 이 복사가
+   원본 템플릿 오염을 구조적으로 막는다.

@@ -1,6 +1,16 @@
 import { useEffect, useState } from "react";
-import { approveCheckpoint, onStageEvent, rejectCheckpoint, requestChanges } from "../api";
-import type { RunRecord, StageEventPayload, StageStatus, Template } from "../types";
+import {
+  approveCheckpoint,
+  cancelRun,
+  getRun,
+  isStaleStageIndexError,
+  onStageEvent,
+  rejectCheckpoint,
+  requestChanges,
+  startStage,
+} from "../api";
+import StageFields from "../components/StageFields";
+import type { RunRecord, Stage, StageEventPayload, StageStatus, Template } from "../types";
 
 interface Props {
   initialRun: RunRecord;
@@ -57,12 +67,14 @@ function logLabelClass(kind: string): string {
 function stageDotClass(status: StageStatus): string {
   if (status === "approved") return "stage-timeline__dot--approved";
   if (status === "awaiting-checkpoint") return "stage-timeline__dot--awaiting";
+  if (status === "awaiting-start") return "stage-timeline__dot--awaiting";
   if (status === "failed") return "stage-timeline__dot--failed";
   return "";
 }
 
 function statusBadgeClass(status: RunRecord["status"]): string {
   if (status === "awaiting-checkpoint") return "badge badge-warning";
+  if (status === "awaiting-stage-start") return "badge badge-warning";
   if (status === "completed") return "badge badge-success";
   if (status === "failed") return "badge badge-danger";
   if (status === "cancelled") return "badge badge-muted";
@@ -71,12 +83,18 @@ function statusBadgeClass(status: RunRecord["status"]): string {
 
 export default function PipelineRun({ initialRun, template, onFinished, onEditTemplate }: Props) {
   const [run, setRun] = useState<RunRecord>(initialRun);
-  const stageNameById = new Map(template.stages.map((s) => [s.id, s.name]));
+  // The run's own resolved names win over the template's: a pre-start edit can rename a
+  // stage for this run only.
+  const stageNameById = new Map<string, string>([
+    ...template.stages.map((s) => [s.id, s.name] as [string, string]),
+    ...run.resolvedStages.map((s) => [s.id, s.name] as [string, string]),
+  ]);
   const [log, setLog] = useState<LogLine[]>([]);
   const [changedFiles, setChangedFiles] = useState<string[]>([]);
   const [feedback, setFeedback] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [stageDraft, setStageDraft] = useState<Stage | null>(null);
 
   useEffect(() => {
     setRun(initialRun);
@@ -85,6 +103,16 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
   useEffect(() => {
     setChangedFiles([]);
   }, [run.currentStageIndex]);
+
+  // PRD E-3: the draft follows the gate. When the index advances, the previous stage's
+  // draft must not linger on screen.
+  useEffect(() => {
+    if (run.status === "awaiting-stage-start") {
+      setStageDraft(run.resolvedStages[run.currentStageIndex] ?? null);
+    } else {
+      setStageDraft(null);
+    }
+  }, [run.status, run.currentStageIndex, run.resolvedStages]);
 
   useEffect(() => {
     const unlistenPromise = onStageEvent((payload) => {
@@ -145,6 +173,59 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleStartStage = async () => {
+    if (!stageDraft) return;
+    setError(null);
+    setBusy(true);
+    try {
+      // The second argument is the generation guard: the very index this panel rendered
+      // from, so the backend runs the stage the user was actually looking at.
+      const updated = await startStage(run.runId, run.currentStageIndex, stageDraft);
+      setRun(updated);
+      if (updated.status === "completed" || updated.status === "cancelled" || updated.status === "failed") {
+        onFinished();
+      }
+    } catch (e) {
+      if (isStaleStageIndexError(e)) {
+        // By definition this means our copy of the run is stale, not that anything went
+        // wrong. Showing an error would strand the user on a stage that no longer exists;
+        // refetch instead and let the effect above rebuild the draft (TRD 3.10).
+        try {
+          setRun(await getRun(run.runId));
+        } catch (refreshError) {
+          setError(String(refreshError));
+        }
+      } else {
+        setError(String(e));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCancelRun = async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      const updated = await cancelRun(run.runId);
+      setRun(updated);
+      onFinished();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // IMP-013 (decision D3): this leaves the run's own edit scope and changes the saved
+  // template for every future run, so it asks first (PRD C-5).
+  const handleEditTemplate = () => {
+    const confirmed = window.confirm(
+      "이 편집은 저장된 원본 템플릿을 바꾸며, 진행 중인 이 run에는 반영되지 않습니다. 계속할까요?"
+    );
+    if (confirmed) onEditTemplate(template);
   };
 
   return (
@@ -228,9 +309,45 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
           </div>
         )}
 
+        {run.status === "awaiting-stage-start" && stageDraft && (
+          <div className="card">
+            <div className="section-label">다음 단계 — 실행 전 확인/수정</div>
+            <p className="help-text" style={{ marginBottom: 12 }}>
+              여기서 고친 내용은 이 run에만 적용되며 저장된 템플릿은 바뀌지 않습니다.
+            </p>
+
+            <StageFields
+              stage={stageDraft}
+              onChange={(patch) => setStageDraft((s) => (s ? { ...s, ...patch } : s))}
+              idPrefix="run-stage"
+              promptLabel="이 단계 프롬프트"
+              lockId
+            />
+
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16 }}>
+              <button className="btn btn-success" onClick={handleStartStage} disabled={busy}>
+                이 단계 실행
+              </button>
+              <span style={{ flex: 1 }} />
+              <button className="btn btn-danger-outline" onClick={handleCancelRun} disabled={busy}>
+                이 run 취소
+              </button>
+            </div>
+          </div>
+        )}
+
+        {run.status === "failed" && (
+          <div className="card">
+            <div className="section-label">이 run은 실패로 종료되었습니다</div>
+            <p className="help-text">
+              실패한 단계는 이 run에서 다시 시작할 수 없습니다. 프롬프트를 고쳐 다시 시도하려면 새 run을 시작하세요.
+            </p>
+          </div>
+        )}
+
         <div style={{ marginTop: 18, display: "flex", gap: 8 }}>
-          <button className="btn btn-outline" onClick={() => onEditTemplate(template)}>
-            템플릿 편집
+          <button className="btn btn-outline" onClick={handleEditTemplate}>
+            원본 템플릿 편집 (모든 향후 실행에 적용)
           </button>
           <button className="btn btn-outline" onClick={onFinished}>
             갤러리로 돌아가기

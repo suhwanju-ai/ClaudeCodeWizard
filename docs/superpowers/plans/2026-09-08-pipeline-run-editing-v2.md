@@ -3719,3 +3719,1092 @@ Per decision D1 a failed run shows an explicit terminal notice (PRD D-3), and
 per decision D3 the original-template button is relabelled and confirms first,
 so the two edit scopes are distinguishable (PRD C-5)."
 ```
+
+---
+
+## Task 15: Move the run entry point back to the gallery (IMP-012, decision D2)
+
+TRD §6.2 option B / PRD C-1, C-2, E-5. Today `TemplateEditor.tsx:92-113` routes **both** 저장 and 실행 through `persistTemplate()`, so pressing the editor's 실행 button (lines 153-155) always overwrites the saved template first — and since commit `a246384` removed the gallery's run button, the editor is the *only* run entry point. That makes "실행 = 원본 덮어쓰기" structural, and PRD C-1 ("원본 템플릿을 한 번도 쓰지 않고 실행이 완주된다") unreachable no matter what the backend does. Decision D2 breaks the coupling by moving the entry point: the editor loses its 실행 button and `onRun` prop, the gallery gets a per-card `실행` button back, and `a246384`'s actual goal — force the user past an edit screen before anything runs — is now met by Task 14's pre-stage gate, at the point where the edit actually applies.
+
+This task also closes the two type errors Task 14 left behind: `App.tsx`'s optimistic `pendingRun` predates the new state machine and lacks the now-required `resolvedStages`.
+
+**Files:**
+- Modify: `src/pages/TemplateEditor.tsx:5-10` (`Props`), `:40` (destructuring), `:92-113` (`persistTemplate`/`handleSave`/`handleRun`), `:143-156` (the button row)
+- Modify: `src/pages/TemplateEditor.test.tsx:31-85` (the whole `describe` block)
+- Modify: `src/pages/TemplateGallery.tsx:5-8` (`Props`), `:10` (signature), `:53` (page subtitle), `:86-102` (the card footer)
+- Modify: `src/pages/TemplateGallery.test.tsx:29-69` (add `onRun` to every render; two new cases)
+- Modify: `src/App.tsx:63-84` (`handleRun`), `:86-112` (view wiring)
+- Modify: `src/App.test.tsx:4-14` (the `./api` mock), `:23-46` (fixtures), `:48-108` (the routing tests)
+- Test: the three `*.test.tsx` files above
+
+**Interfaces:**
+- Consumes: Task 12's `RunRecord` (with `resolvedStages`) and the `"awaiting-stage-start"` / `"awaiting-start"` spellings; Task 13's `StageFields` (indirectly, through the editor and the gate panel); Task 14's `PipelineRun`, whose props are unchanged (`{ initialRun, template, onFinished, onEditTemplate }`).
+- Produces:
+  - `TemplateEditor` props narrow to `{ initial: Template | null; onSaved: (template: Template) => void; onCancel: () => void }` — **`onRun` is removed**, and so is `persistTemplate`.
+  - `TemplateGallery` props widen to `{ onEdit: (template: Template) => void; onNew: () => void; onRun: (template: Template) => void }`. The button label is exactly `실행` (Global Constraints).
+  - `App`'s optimistic `pendingRun`: `status: "awaiting-stage-start"`, `stages[0].status: "awaiting-start"` with the rest `"pending"`, and `resolvedStages: template.stages`.
+  - No backend, IPC, or `api.ts` change. `startPipelineRun`'s three arguments are untouched.
+
+- [ ] **Step 1: Write the failing tests**
+
+Three files change. Start with `src/pages/TemplateGallery.test.tsx`: every existing `render(<TemplateGallery ... />)` call (lines 32, 40, 47, 58, 66) needs the new required prop — add `onRun={vi.fn()}` to each. Then append inside the `describe("TemplateGallery", ...)` block:
+
+```tsx
+  // IMP-012 (decision D2): the gallery is the run entry point again.
+  it("runs a template straight from its gallery card", async () => {
+    vi.mocked(listTemplates).mockResolvedValue([sample]);
+    const onRun = vi.fn();
+    render(<TemplateGallery onEdit={vi.fn()} onNew={vi.fn()} onRun={onRun} />);
+    fireEvent.click(await screen.findByRole("button", { name: "실행" }));
+    expect(onRun).toHaveBeenCalledWith(sample);
+  });
+
+  it("offers 실행 alongside 편집 and 삭제 on every card", async () => {
+    vi.mocked(listTemplates).mockResolvedValue([sample]);
+    render(<TemplateGallery onEdit={vi.fn()} onNew={vi.fn()} onRun={vi.fn()} />);
+    await screen.findByText("웹 프로그램 개발");
+    expect(screen.getByRole("button", { name: "실행" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "편집" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "삭제" })).toBeInTheDocument();
+  });
+```
+
+Next, replace the whole `describe("TemplateEditor", ...)` block in `src/pages/TemplateEditor.test.tsx` (lines 31-85) with:
+
+```tsx
+describe("TemplateEditor", () => {
+  it("disables save when a stage prompt is empty", () => {
+    render(<TemplateEditor initial={existing} onSaved={vi.fn()} onCancel={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("단계 1 프롬프트"), { target: { value: "" } });
+    expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+  });
+
+  it("disables save when there are no stages", () => {
+    render(<TemplateEditor initial={null} onSaved={vi.fn()} onCancel={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+  });
+
+  it("saves the edited template and calls onSaved", async () => {
+    const onSaved = vi.fn();
+    render(<TemplateEditor initial={existing} onSaved={onSaved} onCancel={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("템플릿 이름"), { target: { value: "웹 프로그램 개발 v2" } });
+    fireEvent.click(screen.getByRole("button", { name: "저장" }));
+    await waitFor(() =>
+      expect(saveTemplate).toHaveBeenCalledWith(expect.objectContaining({ name: "웹 프로그램 개발 v2" }))
+    );
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+  });
+
+  it("adds a new stage when '단계 추가' is clicked", () => {
+    render(<TemplateEditor initial={null} onSaved={vi.fn()} onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "단계 추가" }));
+    expect(screen.getByLabelText("단계 1 프롬프트")).toBeInTheDocument();
+  });
+
+  it("shows an error when saveTemplate rejects", async () => {
+    vi.mocked(saveTemplate).mockRejectedValue(new Error("disk full"));
+    render(<TemplateEditor initial={existing} onSaved={vi.fn()} onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "저장" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("disk full");
+  });
+
+  it("does not call onSaved when saveTemplate rejects", async () => {
+    vi.mocked(saveTemplate).mockRejectedValue(new Error("disk full"));
+    const onSaved = vi.fn();
+    render(<TemplateEditor initial={existing} onSaved={onSaved} onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "저장" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("disk full");
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+
+  // IMP-012 (decision D2) / PRD C-1: the editor is not a run entry point any more, so
+  // saving can never happen as a side effect of running.
+  it("offers no 실행 button", () => {
+    render(<TemplateEditor initial={existing} onSaved={vi.fn()} onCancel={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "실행" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "저장" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "취소" })).toBeInTheDocument();
+  });
+});
+```
+
+Finally `src/App.test.tsx`. The `./api` mock at lines 4-14 must grow: `PipelineRun.tsx` now imports `startStage`, `cancelRun`, `getRun` and `isStaleStageIndexError` from the same module, and a factory that omits them makes the import throw. Replace lines 4-46 with:
+
+```tsx
+vi.mock("./api", async () => {
+  const actual = await vi.importActual<typeof import("./api")>("./api");
+  return {
+    listTemplates: vi.fn(),
+    deleteTemplate: vi.fn(),
+    checkCli: vi.fn(),
+    saveTemplate: vi.fn(),
+    startPipelineRun: vi.fn(),
+    onStageEvent: vi.fn(),
+    approveCheckpoint: vi.fn(),
+    requestChanges: vi.fn(),
+    rejectCheckpoint: vi.fn(),
+    startStage: vi.fn(),
+    cancelRun: vi.fn(),
+    getRun: vi.fn(),
+    // The real predicate and prefix — App never calls them, but PipelineRun does.
+    isStaleStageIndexError: actual.isStaleStageIndexError,
+    STALE_STAGE_INDEX_PREFIX: actual.STALE_STAGE_INDEX_PREFIX,
+  };
+});
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+
+import { listTemplates, checkCli, saveTemplate, startPipelineRun, onStageEvent, startStage } from "./api";
+import { open } from "@tauri-apps/plugin-dialog";
+import App from "./App";
+import type { RunRecord, Template } from "./types";
+
+const sample: Template = {
+  id: "t1",
+  name: "웹 프로그램 개발",
+  description: "desc",
+  stages: [
+    {
+      id: "s1",
+      name: "요구사항",
+      prompt: "PRD 작성",
+      permissionMode: "acceptEdits",
+      allowedTools: [],
+      checkpoint: true,
+    },
+  ],
+};
+
+/** What the backend answers with once start_pipeline_run resolves. */
+const backendRun: RunRecord = {
+  runId: "run1",
+  templateId: "t1",
+  targetDir: "/tmp/new-project",
+  status: "awaiting-stage-start",
+  currentStageIndex: 0,
+  stages: [{ id: "s1", status: "awaiting-start", sessionId: null, log: [] }],
+  // Renamed on purpose, so a test can watch the optimistic record be replaced by the
+  // authoritative one rather than just matching itself.
+  resolvedStages: [{ ...sample.stages[0], name: "백엔드가 확정한 요구사항" }],
+};
+
+beforeEach(() => {
+  vi.mocked(listTemplates).mockReset().mockResolvedValue([sample]);
+  vi.mocked(checkCli).mockReset().mockResolvedValue("available:mock-claude 0.0.1");
+  vi.mocked(saveTemplate).mockReset().mockResolvedValue(undefined);
+  vi.mocked(onStageEvent).mockReset().mockResolvedValue(() => {});
+  vi.mocked(startStage).mockReset();
+  vi.mocked(open).mockReset();
+  vi.mocked(startPipelineRun).mockReset();
+});
+```
+
+Then replace the `describe("App routing", ...)` block (lines 48-108) with:
+
+```tsx
+describe("App routing", () => {
+  it("starts on the template gallery", async () => {
+    render(<App />);
+    expect(await screen.findByText("웹 프로그램 개발")).toBeInTheDocument();
+  });
+
+  // IMP-012 (decision D2): running starts at the gallery card, not in the editor.
+  it("picks a target folder and starts a run when 실행 is clicked on a gallery card", async () => {
+    vi.mocked(open).mockResolvedValue("/tmp/new-project");
+    let resolveStart: (value: RunRecord) => void = () => {};
+    vi.mocked(startPipelineRun).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveStart = resolve;
+        })
+    );
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "실행" }));
+
+    await waitFor(() => expect(open).toHaveBeenCalledWith({ directory: true }));
+    await waitFor(() =>
+      expect(startPipelineRun).toHaveBeenCalledWith("t1", "/tmp/new-project", expect.any(String))
+    );
+
+    // The run view mounts on the optimistic record before startPipelineRun resolves, so
+    // the stage-event listener is live from the very first stage — and that record must
+    // already describe the gate, not a running stage (PRD A-1).
+    expect(await screen.findByText("상태: awaiting-stage-start")).toBeInTheDocument();
+
+    // ...and is then replaced by the authoritative record the backend created.
+    resolveStart(backendRun);
+    expect(await screen.findByText("백엔드가 확정한 요구사항: awaiting-start")).toBeInTheDocument();
+  });
+
+  // PRD C-1: no write to the saved template anywhere on the path into a run.
+  it("never saves the template on the way to a run", async () => {
+    vi.mocked(open).mockResolvedValue("/tmp/new-project");
+    vi.mocked(startPipelineRun).mockResolvedValue(backendRun);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "실행" }));
+
+    await waitFor(() => expect(startPipelineRun).toHaveBeenCalled());
+    expect(saveTemplate).not.toHaveBeenCalled();
+  });
+
+  // The optimistic record must carry resolvedStages, or the gate panel has nothing to
+  // render and the user stares at an empty screen until the backend answers.
+  it("renders the first stage's gate panel from the optimistic record", async () => {
+    vi.mocked(open).mockResolvedValue("/tmp/new-project");
+    vi.mocked(startPipelineRun).mockImplementation(() => new Promise(() => {}));
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "실행" }));
+
+    expect(await screen.findByLabelText("이 단계 프롬프트")).toHaveValue("PRD 작성");
+    expect(screen.getByLabelText("단계 ID")).toHaveValue("s1");
+    expect(screen.getByRole("button", { name: "이 단계 실행" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "이 run 취소" })).toBeInTheDocument();
+  });
+
+  it("stays on the gallery when the folder dialog is dismissed", async () => {
+    vi.mocked(open).mockResolvedValue(null);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "실행" }));
+
+    await waitFor(() => expect(open).toHaveBeenCalled());
+    expect(startPipelineRun).not.toHaveBeenCalled();
+    expect(screen.getByText("웹 프로그램 개발")).toBeInTheDocument();
+  });
+
+  it("shows an error and returns to the gallery when startPipelineRun rejects", async () => {
+    vi.mocked(open).mockResolvedValue("/tmp/new-project");
+    vi.mocked(startPipelineRun).mockRejectedValue(new Error("target dir already contains a pipeline run"));
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "실행" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("target dir already contains a pipeline run");
+    expect(await screen.findByText("웹 프로그램 개발")).toBeInTheDocument();
+  });
+
+  it("opens a pure editor from 편집 — no run button, no folder dialog", async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "편집" }));
+
+    expect(await screen.findByRole("button", { name: "저장" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "실행" })).not.toBeInTheDocument();
+    expect(open).not.toHaveBeenCalled();
+  });
+});
+```
+
+The old `does not run a template directly from the gallery — only 편집/삭제 are offered` case asserted exactly the behaviour decision D2 reverses; it is deleted, and `runs a template straight from its gallery card` above is its replacement.
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `npx vitest run src/App.test.tsx src/pages/TemplateEditor.test.tsx src/pages/TemplateGallery.test.tsx`
+Expected: FAIL —
+- `TemplateGallery.test.tsx`: `Unable to find an accessible element with the role "button" and name "실행"`.
+- `TemplateEditor.test.tsx`: the `offers no 실행 button` case fails because the button is still there; the others fail type-check on the missing `onRun` prop.
+- `App.test.tsx`: `Unable to find ... name "실행"` on the gallery, and `renders the first stage's gate panel` fails because the optimistic record has no `resolvedStages`.
+
+- [ ] **Step 3: Add the 실행 button and the `onRun` prop to the gallery**
+
+In `src/pages/TemplateGallery.tsx`, replace the `Props` interface and the component signature (lines 5-10) with:
+
+```tsx
+interface Props {
+  onEdit: (template: Template) => void;
+  onNew: () => void;
+  /**
+   * IMP-012 (decision D2). Running starts here again, from the saved template — the
+   * editor no longer runs anything, so pressing 실행 can never overwrite what it runs.
+   * Per-run edits happen at the run screen's pre-stage gate instead.
+   */
+  onRun: (template: Template) => void;
+}
+
+export default function TemplateGallery({ onEdit, onNew, onRun }: Props) {
+```
+
+Replace the page subtitle (line 53) with:
+
+```tsx
+          <p className="page-subtitle">
+            템플릿을 실행하면 각 단계가 실행 직전에 멈춥니다 — 그 자리에서 확인·수정한 뒤 실행하세요.
+          </p>
+```
+
+Replace the card footer's button row (lines 95-101) with:
+
+```tsx
+              <button className="btn btn-success" onClick={() => onRun(template)}>
+                실행
+              </button>
+              <button className="btn btn-success-subtle" onClick={() => onEdit(template)}>
+                편집
+              </button>
+              <span style={{ flex: 1 }} />
+              <button className="btn btn-ghost" onClick={() => handleDelete(template.id)}>
+                삭제
+              </button>
+```
+
+- [ ] **Step 4: Strip the editor down to save and cancel**
+
+In `src/pages/TemplateEditor.tsx`, replace the `Props` interface (lines 5-10) with:
+
+```tsx
+interface Props {
+  initial: Template | null;
+  onSaved: (template: Template) => void;
+  onCancel: () => void;
+}
+```
+
+Change the component signature (line 40) to:
+
+```tsx
+export default function TemplateEditor({ initial, onSaved, onCancel }: Props) {
+```
+
+Replace `persistTemplate`, `handleSave` and `handleRun` (lines 92-113) with a single handler:
+
+```tsx
+  // IMP-012 (decision D2): there is deliberately no run path here any more. Keeping a
+  // shared persistTemplate() helper with one caller would just invite the save-then-run
+  // coupling back, so it is folded into the only action the editor still performs.
+  const handleSave = async () => {
+    if (error) return;
+    setSaveError(null);
+    setBusy(true);
+    try {
+      await saveTemplate(template);
+      onSaved(template);
+    } catch (e) {
+      setSaveError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+```
+
+Replace the button row (lines 143-156) with:
+
+```tsx
+        <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+          <button className="btn btn-outline" onClick={() => setShowJson((s) => !s)}>
+            {"{ } JSON"}
+          </button>
+          <button className="btn btn-outline" onClick={onCancel}>
+            취소
+          </button>
+          <button className="btn btn-success" onClick={handleSave} disabled={!!error || busy}>
+            저장
+          </button>
+        </div>
+```
+
+저장 takes over `btn btn-success` because it is now the only committing action on this screen.
+
+- [ ] **Step 5: Rewire `App.tsx`**
+
+Replace `handleRun` (lines 63-84) with:
+
+```tsx
+  const handleRun = async (template: Template) => {
+    setError(null);
+    try {
+      const targetDir = await open({ directory: true });
+      if (!targetDir || Array.isArray(targetDir)) return;
+      const runId = crypto.randomUUID();
+      // Optimistic record. It mounts the run screen — and with it the stage-event
+      // listener — before start_pipeline_run answers, so it has to be shaped exactly
+      // like what the backend's RunRecord::new produces: parked at the first stage's
+      // gate with nothing executing (PRD A-1), not "running".
+      const pendingRun: RunRecord = {
+        runId,
+        templateId: template.id,
+        targetDir,
+        status: "awaiting-stage-start",
+        currentStageIndex: 0,
+        stages: template.stages.map((s, i) => ({
+          id: s.id,
+          status: i === 0 ? "awaiting-start" : "pending",
+          sessionId: null,
+          log: [],
+        })),
+        // Required on RunRecord — there is no serde default on the Rust side (decision
+        // D8) — and it is what the gate panel renders from, so omitting it would leave
+        // the panel blank until the backend replied.
+        resolvedStages: template.stages,
+      };
+      setView({ name: "run", run: pendingRun, template });
+      const run = await startPipelineRun(template.id, targetDir, runId);
+      setView({ name: "run", run, template });
+    } catch (e) {
+      setError(String(e));
+      setView({ name: "gallery" });
+    }
+  };
+```
+
+`View` (lines 10-13) is unchanged — D2 moves a callback, not a screen.
+
+Then drop `onRun` from the editor branch (lines 88-95) and add it to the gallery branch (lines 106-111):
+
+```tsx
+      <TemplateEditor
+        initial={view.template}
+        onSaved={() => setView({ name: "gallery" })}
+        onCancel={() => setView({ name: "gallery" })}
+      />
+```
+
+```tsx
+      <TemplateGallery
+        onEdit={(template) => setView({ name: "editor", template })}
+        onNew={() => setView({ name: "editor", template: null })}
+        onRun={handleRun}
+      />
+```
+
+- [ ] **Step 6: Run the whole frontend suite and the type-check**
+
+Run: `npx vitest run`
+Expected: PASS — every file. `App.test.tsx` 7 cases, `TemplateEditor.test.tsx` 7, `TemplateGallery.test.tsx` 7, plus `PipelineRun.test.tsx`, `StageFields.test.tsx` and `api.test.ts` unchanged from Tasks 12-14.
+
+Run: `npx tsc --noEmit`
+Expected: **no errors at all.** This is the check that matters: Task 14 ended with `src/App.tsx` and `src/App.test.tsx` still erroring on the optimistic record's missing `resolvedStages`, and this task is what closes them. If anything still errors, do not proceed to Task 16.
+
+Run: `cargo test --manifest-path src-tauri/Cargo.toml`
+Expected: PASS — unchanged. This task touches no Rust; run it only to confirm that.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/App.tsx src/App.test.tsx src/pages/TemplateEditor.tsx src/pages/TemplateEditor.test.tsx src/pages/TemplateGallery.tsx src/pages/TemplateGallery.test.tsx
+git commit -m "feat: move the run entry point back to the gallery (IMP-012)
+
+TRD 6.2 option B. The editor's 실행 button and onRun prop are gone, so saving a
+template can no longer be a side effect of running one and PRD C-1 holds for the
+whole run rather than only after it starts. Running begins at a per-card 실행
+button in the gallery, which is honest about what it runs: the saved template.
+The reason a246384 routed running through the editor — force a look at the
+prompts first — is now served by the pre-stage gate, at the point where the edit
+actually applies and without touching the original.
+
+App's optimistic record is rebuilt for the new state machine: awaiting-stage-start
+with stage 0 at awaiting-start, and carrying resolvedStages, which RunRecord now
+requires and the gate panel renders from. That closes the last two type errors
+left over from the run-screen commit."
+```
+
+---
+
+## Task 16: Documentation sweep — README, the eight `documents/` files, and the portal (IMP-011, IMP-022, decision D7)
+
+TRD §3.13, §3.15, §5.4 / PRD B-5, F-2, F-4. Fourteen tasks changed what the app *is*: the only stop used to be after a checkpoint, and now every stage stops before it runs; there used to be two stores, and now there are three. Every sentence in `README.md` and `documents/` that describes the old shape is now wrong, and PRD F-4 makes correcting them a success criterion rather than a courtesy.
+
+This task also carries the entire implementation of **decision D7 / TRD §6.7 option C**. That option's cost was "zero code, document the decision explicitly" — Step 2 is where the explicit documentation actually gets written, so skipping it leaves TRD §6.7 unresolved rather than decided, and PRD B-5's second clause unsatisfied. Decisions **D8** (legacy quarantine) and **D4** (a folder holds one run) are likewise surfaced to end users here, as a natural part of describing the third store.
+
+No source file changes in this task. Steps 1-7 edit prose; Step 9 is the manual verification PRD F-2 demands, and it needs the real `claude` CLI, not the mock.
+
+**Files:**
+- Modify: `README.md:9-22` (How it works), `:58-82` (Project layout), `:84-95` (Known v1 limitations)
+- Modify: `documents/database-design.md:30-42` (§1 저장소 목록), `:80-100` (§2.2 tables), append §2.3 after line 100, `:106-111` (§3 관계 표), `:130-139` (§5 마이그레이션)
+- Modify: `documents/system-architecture.md:39-75` (mermaid), `:88-99` (컴포넌트 표), `:116-131` (§5 데이터 흐름), `:160-166` (§7 표)
+- Modify: `documents/user-guide.md:132-145` (§4.1), `:147-154` (§4.2), `:156-170` (§4.3), `:192-201` (§6.1), `:244-256` (§8)
+- Modify: `documents/api-design.md:64-82` (§3 에러 표), `:209-247` (`start_pipeline_run`), insert three commands after line 249
+- Modify: `documents/api-user-guide.md:98-124` (시나리오 3), `:180-194` (§4)
+- Modify: `documents/sequence-diagrams.md:54-113` (§2)
+- Modify: `documents/class-diagram.md:43-75` (`RunRecord`/enums), `:127-137` (`Orchestrator`)
+- Modify: `documents/er-diagram.md:10-50` (mermaid), `:60-70` (관계 설명)
+- Modify: `documents/docs-portal.html` (the `#database-design`, `#system-architecture`, `#user-guide`, `#api-design`, `#api-user-guide`, `#sequence-diagrams`, `#class-diagram`, `#er-diagram` sections)
+- Test: none automated (prose task). Step 7 re-runs the full suite as a regression guard; Step 8 is the PRD F-2 manual checklist.
+
+**Interfaces:**
+- Consumes: every user-visible outcome of Tasks 3-15 — `MANIFEST_DIR_NAME`, `runs-legacy-v1`, `RunStatus::AwaitingStageStart`, `StageStatus::AwaitingStart`, `resolved_stages`, `start_stage`/`cancel_run`/`get_run`, the gallery's `실행` button, and the run screen's `이 단계 실행` / `이 run 취소` labels.
+- Produces: no code and no exported API. The only durable artifact is the written record of decision D7, which TRD §6.7 option C names as its deliverable.
+
+- [ ] **Step 1: Update `README.md`**
+
+Replace the `## How it works` section (lines 9-22) with:
+
+```markdown
+## How it works
+
+1. Pick a template in the gallery, press **실행**, and choose (or create) a target
+   folder. Nothing is executed yet — creating a run spawns no process at all.
+2. **Every stage stops before it runs.** The run screen shows a
+   "다음 단계 — 실행 전 확인/수정" panel pre-filled with that stage's prompt, permission
+   mode, allowed tools and checkpoint flag. Anything you change there applies to this
+   run only; the saved gallery template is never written.
+3. Pressing **이 단계 실행** runs exactly that one stage as its own
+   `claude --print --output-format stream-json` invocation, with `--resume <session_id>`
+   chaining conversation context from one stage to the next so later stages know what
+   earlier stages built.
+4. When the stage finishes, the run returns to the *next* stage's gate — never straight
+   into the next `claude` process. A stage marked as a checkpoint first shows its live
+   log plus **승인 / 수정 요청 보내기 / 거부** controls.
+5. Finishing or approving the last stage completes the run. **이 run 취소** is offered at
+   every gate, so a run is never a dead end.
+
+While a run exists, the stage definitions it is actually using are mirrored into
+`<targetDir>/.claude-pipeline-wizard/run.json` and `pipeline.json`, so a folder can be
+inspected without opening the app.
+
+Templates, run records, and the two seed templates ("웹 프로그램 개발" and
+"데스크톱 프로그램 개발 (Tauri)") are all plain JSON files — there's no embedded
+database and no bundled AI SDK; the app is a thin, persistent orchestration layer
+around the `claude` CLI you already have installed.
+```
+
+Replace the `## Project layout` code block (lines 60-82) with:
+
+```
+src/                      React frontend
+  components/
+    StageFields.tsx       The one stage form, shared by the editor and the run gate
+  pages/
+    TemplateGallery.tsx   Browse, run, edit, delete templates
+    TemplateEditor.tsx    Form-based stage editor (add/remove/reorder, validation)
+    PipelineRun.tsx       Pre-stage edit gate, live stage log, checkpoint approval
+  api.ts                  Tauri invoke()/listen() wrappers
+  types.ts                TypeScript mirrors of the Rust IPC types
+
+src-tauri/src/
+  template/               Template/Stage types, file-backed CRUD store, seed templates
+  engine/
+    run_record.rs         Run state machine (RunRecord/StageRun, gate + checkpoint transitions)
+    project_manifest.rs   Writes <targetDir>/.claude-pipeline-wizard/{run,pipeline}.json
+    legacy_migration.rs   One-shot startup quarantine of pre-resolvedStages run records
+    stream_json.rs        Parser for the claude CLI's stream-json output
+    executor.rs           Spawns the claude CLI per stage, streams events, enforces a timeout
+    orchestrator.rs       One stage per start_stage call; owns every state transition
+  commands.rs             Tauri commands exposed to the frontend
+  bin/mock_claude.rs      Test-only stand-in for the claude CLI (used by the Rust test suite)
+
+docs/superpowers/
+  specs/                  Design spec
+  plans/                  Implementation plan
+```
+
+Replace the `## Known v1 limitations` section (lines 84-95) with — note the existing three bullets are **kept**, per TRD §3.13, because GAP-1 is still open:
+
+```markdown
+## Known v1 limitations
+
+- **New folders only** — a template runs against a folder you pick, and a folder that
+  already contains `.claude-pipeline-wizard/run.json` is refused outright rather than
+  overwritten. Running against an existing codebase isn't supported yet.
+- **No cross-restart resume UI** — run state is persisted to disk per
+  transition, but there's currently no command or screen to reattach to an
+  existing run after the app restarts; recovery today means inspecting the
+  JSON file under the app's `runs/` directory by hand.
+- **The project-local manifest makes a run easier to look at, not resumable** —
+  `<targetDir>/.claude-pipeline-wizard/{run,pipeline}.json` is rewritten on every
+  transition so a folder's pipeline state can be read without the app, but nothing ever
+  reads it back in. It does not solve the resume limitation above.
+- **Run records written before the pre-stage gate can't be opened** — on the first
+  launch of this version, records that predate the required `resolvedStages` field are
+  moved to `<app_data_dir>/runs-legacy-v1/`. Nothing is deleted, but the app will not
+  read them.
+- **Sequential stages only** — no parallel or branching stages within a
+  template.
+```
+
+- [ ] **Step 2: Update `documents/database-design.md` — the third store, and decision D7**
+
+Replace the §1 table and the paragraph under it (lines 32-42) with:
+
+```markdown
+| # | 저장소 | 디렉터리 | 레코드 형태 | 예상 레코드 수 |
+|---|--------|---------|------------|---------------|
+| 1 | 템플릿 저장소 | `<app_data_dir>/templates/` | `Template` (JSON) | 수십 개 수준 (사용자가 직접 만드는 템플릿 + 시드 2개) |
+| 2 | 실행 기록 저장소 | `<app_data_dir>/runs/` | `RunRecord` (JSON) | 실행할 때마다 1개씩 누적, 삭제 기능 없음 |
+| 3 | **프로젝트 로컬 매니페스트** | `<targetDir>/.claude-pipeline-wizard/` | `run.json` (`RunRecord` 전체) + `pipeline.json` (`Template` 형태 스냅샷) | 대상 폴더 1개당 정확히 1세트 |
+| — | 레거시 격리 보관소 | `<app_data_dir>/runs-legacy-v1/` | 구 형식 `RunRecord` (앱이 읽지 않음) | 이 버전 최초 기동 시 1회 이동된 파일 수 |
+
+3번은 2번을 **대체하지 않는다.** 모든 상태 전이는 `runs/{run_id}.json`과 매니페스트
+**양쪽에** 쓰인다(2.3절). 1·2번이 "앱이 무엇을 했는가"라면 3번은 "이 폴더가 무엇으로부터
+만들어졌는가"이며, 앱 없이 폴더만 열어도 읽을 수 있는 것이 존재 이유다.
+
+`<app_data_dir>`는 Tauri의 `app.path().app_data_dir()`이 반환하는 OS별 표준 앱 데이터
+경로다(Windows: `%APPDATA%\com.suhwanju.claude-pipeline-wizard\`, macOS:
+`~/Library/Application Support/com.suhwanju.claude-pipeline-wizard/`, Linux:
+`~/.local/share/com.suhwanju.claude-pipeline-wizard/`). `identifier`는
+`src-tauri/tauri.conf.json`에 정의되어 있다. `<targetDir>`는 사용자가 실행 시작 시 고른
+대상 폴더 그 자체다.
+```
+
+In §2.2, replace the `status` row and append a `resolvedStages` row to the **RunRecord** table (lines 86-88):
+
+```markdown
+| `status` | enum | NOT NULL | `awaiting-stage-start` | `running` \| `awaiting-stage-start` \| `awaiting-checkpoint` \| `completed` \| `failed` \| `cancelled` | 실행 전체 상태. `awaiting-stage-start`는 **아무것도 실행되고 있지 않은 실행 전 게이트**를 뜻한다 |
+| `currentStageIndex` | number | NOT NULL | `0` | `0 <= n < stages.length` | 현재 게이트에 있거나 실행 중인 단계의 배열 인덱스 |
+| `stages` | `StageRun[]` | NOT NULL | - | 생성 시 템플릿의 단계 수와 1:1 매핑 | 단계별 실행 상태 목록 |
+| `resolvedStages` | `Stage[]` | NOT NULL | 생성 시 템플릿 `stages`의 복사본 | `stages`와 같은 길이·같은 id 순서. **`#[serde(default)]` 없음 — 필수 필드** | 이 run이 실제로 실행할 단계 정의. 실행 전 게이트에서 수정한 내용이 여기 들어가며, 원본 템플릿 파일은 절대 쓰지 않는다 |
+```
+
+Replace the **StageRun** `status` row (line 94) with:
+
+```markdown
+| `status` | enum | NOT NULL | `pending` (0번 단계만 생성 시 `awaiting-start`) | `pending` \| `awaiting-start` \| `running` \| `awaiting-checkpoint` \| `approved` \| `failed` | 단계 상태. `awaiting-start`는 "이 단계 차례가 됐지만 아직 실행하지 않았다" |
+```
+
+Then insert a new subsection immediately after §2.2 (after line 100, before the `---` on line 102):
+
+```markdown
+### 2.3 &lt;targetDir&gt;/.claude-pipeline-wizard/ — 프로젝트 로컬 매니페스트
+
+정의: `src-tauri/src/engine/project_manifest.rs`
+
+| 파일 | 내용 | 생성/갱신 시점 |
+|---|---|---|
+| `run.json` | `RunRecord` 전체(`resolvedStages` 포함) — `runs/{run_id}.json`과 **같은 내용** | `start_run`, 그리고 그 뒤의 모든 상태 전이 |
+| `pipeline.json` | `Template` 형태 스냅샷. `id`/`name` = `RunRecord.templateId`, `description` = 빈 문자열, `stages` = `resolvedStages` | 위와 동일 |
+
+- **디렉터리 이름은 고정**이며(`MANIFEST_DIR_NAME = ".claude-pipeline-wizard"`) run별 하위
+  디렉터리를 만들지 않는다. 따라서 **한 폴더는 run 하나만 담을 수 있다** — 이미 `run.json`이
+  있는 폴더로 새 실행을 시작하면 `TargetDirInUse` 에러로 거부된다. 먼저 시작한 run의 스냅샷을
+  조용히 덮어써서 잃어버리는 일이 구조적으로 불가능하다.
+- **쓰기 실패는 치명적으로 취급한다.** 매니페스트 쓰기가 실패하면 `runs/`에 이미 반영된
+  전이를 전이 직전 스냅샷으로 되돌리고(`Orchestrator::save_with_rollback`) 에러를 올린다.
+  run은 직전 게이트 상태에 남으므로 재시도도 취소도 가능하다.
+- `pipeline.json`은 **원본 템플릿이 아니라 `resolvedStages`의 스냅샷**이다. 실행 직전
+  게이트에서 고친 프롬프트가 여기 남고, 갤러리의 저장된 템플릿은 그대로다.
+
+**이 매니페스트가 기록하지 않는 것 — 명시적 결정 (IMP-020)**
+
+> 매니페스트는 **파이프라인 정의의 스냅샷이지, 감사(audit) 목적의 완전한 실행 기록이
+> 아니다.** 특히 **`request_changes`로 입력한 수정요청 피드백 프롬프트는 어디에도 기록하지
+> 않는다** — `resolvedStages`에도, `pipeline.json`에도, `StageRun`의 별도 필드에도 남지
+> 않는다. 피드백은 해당 단계를 1회 재실행하는 데만 쓰이는 일회성 입력으로 취급한다. 그
+> 결과 "이 단계가 정확히 어떤 프롬프트로 재실행됐는가"는 `run.json`/`pipeline.json`만으로는
+> 재구성할 수 없다.
+>
+> 남는 것은 있다. `StageRun.log`에 `StageEvent` 전체가 누적되므로 모델의 응답과 도구 사용
+> 내역은 그대로 남는다. 남지 않는 것은 사용자가 입력한 피드백 텍스트뿐이다.
+>
+> 이렇게 정한 이유는 두 가지다. (1) `RunRecord` 스키마 변경을 `resolvedStages` 한 번으로
+> 묶어 마이그레이션을 두 번 하지 않기 위해서, (2) 사용자가 입력한 자연어가 프로젝트 폴더의
+> `run.json`에 그대로 남는 것을 피하기 위해서다. 완전한 감사 기록이 필요해지면 `StageRun`에
+> 실행 프롬프트 이력 필드를 추가하는 것이 정공법이며, 그때는 별도의 마이그레이션이 필요하다.
+```
+
+In §3, replace the `RunRecord.templateId → Template.id` row (line 110) and append two rows:
+
+```markdown
+| RunRecord.templateId → Template.id | N:1 (소프트) | **강제 없음** | 참조 무결성 없음. 다만 **실행 중 단계 정의는 `resolvedStages`에서만 읽으므로**, 템플릿이 삭제·수정된 뒤에 체크포인트를 승인해도 실행이 실패하지 않는다. `templateId`는 표시·추적용 문자열로만 남는다 |
+| RunRecord → Stage (`resolvedStages`) | 1:N (내장) | `RunRecord::new()`가 템플릿 `stages`를 복사 | 이 run 전용 파이프라인 사본. `apply_stage_override`가 현재 인덱스 1개만 교체하며, 원본 `templates/{id}.json`은 어떤 경로로도 쓰지 않는다 |
+| RunRecord ↔ 프로젝트 로컬 매니페스트 | 1:1 (미러) | `Orchestrator::save()`가 두 곳에 연속으로 쓴다 | `runs/{run_id}.json`이 원본, `<targetDir>/.claude-pipeline-wizard/run.json`이 사본. 사본 쓰기 실패는 원본 쓰기를 롤백시킨다 |
+```
+
+Finally, replace §5's first two bullets (lines 132-139) with:
+
+```markdown
+- **하위 호환 원칙**: `Template`/`RunRecord` 구조체에 새 필드를 추가할 때는 `serde`의
+  기본값 처리(`#[serde(default)]` 등)를 활용해 기존에 저장된 JSON 파일이 깨지지 않게
+  하는 것이 원칙이다. **의도된 예외가 하나 있다**: `RunRecord.resolvedStages`는
+  `#[serde(default)]` 없이 **필수 필드**로 추가됐다. 기본값을 주면 "실행할 단계 정의를
+  모르는 run"이 조용히 만들어져 실행 전 게이트가 빈 화면이 되기 때문이다.
+- **1회성 격리 마이그레이션 (IMP-018)**: 그 예외의 대가로, 앱 기동 시
+  `engine::legacy_migration::quarantine_legacy_runs()`가 `runs/*.json`을 훑어
+  `resolvedStages` 키가 없는 파일(그리고 아예 파싱되지 않는 파일)을
+  `<app_data_dir>/runs-legacy-v1/`로 **이동**한다. 삭제하지 않고, 두 번째 기동부터는 옮길
+  것이 없으므로 멱등(idempotent)이며, 이동 자체가 실패해도 로그만 남기고 앱은 정상
+  기동한다 — 마이그레이션이 기동을 막지 않는다. 격리된 파일은 앱에서 열 수 없고, 필요하면
+  사람이 직접 열어 확인해야 한다.
+- **파괴적 변경 시 절차**: 필드 이름 변경이나 필수 필드 추가처럼 기존 JSON과 호환되지
+  않는 변경이 또 필요해지면, 위 격리 방식(새 디렉터리로 이동)이나 1회성 변환 스크립트
+  중 하나를 골라야 한다. 조용히 실패하게 두는 선택지는 없다.
+- **손상 파일 대응**: `serde_json::from_str` 파싱 실패 시 `"json error: ..."`로 전체
+  `list()` 호출 자체가 실패한다(→ [API 설계 문서](api-design.md) 3절). `runs/`의 손상 파일은
+  위 격리 마이그레이션이 기동 시 자동으로 치워주지만, `templates/`에는 그런 장치가 없으므로
+  디렉터리를 열어 손상된 `.json` 파일을 수동으로 찾아 제거/복구해야 한다.
+```
+
+- [ ] **Step 3: Update `documents/system-architecture.md` — the stop points**
+
+In the §2 mermaid diagram, replace the `Backend` and `Storage` subgraphs (lines 39-50) with:
+
+```
+    subgraph Backend["백엔드 - Rust"]
+        Commands["commands.rs - Tauri 커맨드"]
+        Orchestrator["Orchestrator - 게이트/체크포인트 상태 머신"]
+        Executor["executor.rs - claude 프로세스 스폰"]
+        Manifest["project_manifest.rs - targetDir 매니페스트 쓰기"]
+        Legacy["legacy_migration.rs - 기동 시 레거시 run 격리"]
+        CliCheck["cli_check.rs - claude --version 확인"]
+    end
+
+    subgraph Storage["로컬 파일 시스템"]
+        TemplatesJson[("templates/{id}.json")]
+        RunsJson[("runs/{run_id}.json")]
+        ManifestJson[("targetDir/.claude-pipeline-wizard/ - run.json + pipeline.json")]
+    end
+```
+
+and add three edges next to `Orchestrator --> RunsJson` (line 66):
+
+```
+    Orchestrator --> Manifest
+    Manifest --> ManifestJson
+    Legacy --> RunsJson
+```
+
+Append two rows to the §3 component table (after line 99):
+
+```markdown
+| `project_manifest` (`engine/project_manifest.rs`) | Rust + `serde_json` | 대상 폴더 검증(절대 경로 요구)과 `<targetDir>/.claude-pipeline-wizard/{run,pipeline}.json` 쓰기. 상태 머신을 모르며, 넘겨받은 `RunRecord`를 직렬화할 뿐이다 |
+| `legacy_migration` (`engine/legacy_migration.rs`) | Rust | 기동 시 1회, `resolvedStages`가 없는 구 형식 run 레코드를 `runs-legacy-v1/`로 이동. 실패해도 기동을 막지 않는다 |
+```
+
+Replace §5 in full (lines 116-131) with:
+
+```markdown
+## 5. 데이터 흐름
+
+1. 앱 기동 시 `legacy_migration`이 `runs/`의 구 형식 레코드를 `runs-legacy-v1/`로
+   격리한다(1회, 멱등, 실패해도 기동 계속).
+2. 사용자가 갤러리 카드의 **실행**을 누르고 대상 폴더를 고른다 → `start_pipeline_run`
+   호출. 이 커맨드는 **어떤 프로세스도 스폰하지 않는다** — 템플릿을 로드해 `RunRecord`를
+   만들고 `runs/{run_id}.json`과 `<targetDir>/.claude-pipeline-wizard/{run,pipeline}.json`에
+   저장한 뒤 즉시 반환한다. run은 `awaiting-stage-start`, 즉 **1단계 실행 전 게이트**에서
+   멈춘다.
+3. 실행 화면이 `resolvedStages[currentStageIndex]`로 편집 패널을 채운다. 사용자는
+   프롬프트·권한 모드·허용 도구·체크포인트를 이 run에 한해 수정할 수 있다(원본 템플릿은
+   쓰지 않는다). 단계 ID만은 표시되되 잠겨 있다.
+4. **이 단계 실행**을 누르면 `start_stage(runId, expectedStageIndex, stageOverride)`가
+   호출된다. run별 뮤텍스와 `expectedStageIndex` 세대 검사를 모두 통과한 호출만
+   `Executor`로 내려가 `claude` 프로세스를 **정확히 하나** 스폰한다. stdout의 각 줄이
+   `StageEvent`로 파싱되어 `pipeline://stage-event`로 프론트엔드까지 실시간 전달된다.
+5. 프로세스가 종료되면 결과에 따라 `RunRecord`가 갱신되고 두 저장소에 다시 저장된다.
+   - 실패/타임아웃 → `failed`. **종료 상태이며 이 run에서는 재시도할 수 없다**(새 run 필요).
+   - 체크포인트 단계 → `awaiting-checkpoint`에서 승인/수정요청/거부를 기다린다.
+   - 그 외 → **자동으로 다음 단계를 실행하지 않고** 다음 단계의 게이트로 복귀한다.
+6. 체크포인트를 승인해도 결과는 같다 — 다음 단계의 게이트로 복귀할 뿐이다. 즉 **정지
+   지점은 두 곳이다: 모든 단계의 실행 직전, 그리고 체크포인트 단계의 실행 직후.**
+   `claude` 프로세스는 사용자가 **이 단계 실행**을 누를 때만 뜬다.
+7. 마지막 단계가 승인/완료되면 `RunRecord.status`가 `completed`가 되며 흐름이 끝난다.
+   어느 게이트에서든 **이 run 취소**로 `cancelled` 종료가 가능하다.
+
+전체 흐름의 이벤트 단위 상세는 → [시퀀스 다이어그램](sequence-diagrams.md) 참고.
+```
+
+Replace the `확장성`/`복구성` rows of the §7 table (lines 165-166) with:
+
+```markdown
+| 확장성 | 단일 사용자 로컬 앱이므로 수평 확장 개념이 적용되지 않음. 여러 run을 동시에 열 수 있으며, run 하나의 load-check-save 구간은 run별 `tokio::sync::Mutex`로 직렬화된다(자식 프로세스 대기 구간에는 락을 잡지 않는다) |
+| 복구성 | 모든 상태 전이가 `runs/{run_id}.json`과 `<targetDir>/.claude-pipeline-wizard/`에 즉시 저장된다. 다만 **매니페스트는 사람이 읽기 위한 것이지 앱이 다시 읽어들이지 않는다** — 앱 재시작 후 진행 중이던 run을 다시 여는 UI는 여전히 없다(v1 알려진 제약, → [사용 설명서](user-guide.md)) |
+```
+
+- [ ] **Step 4: Update `documents/user-guide.md`**
+
+Replace the §4.1 ASCII gallery mock (lines 132-142) so the new button appears:
+
+```
++--------------------------------------------------+
+| 템플릿 갤러리                        [+ 새 템플릿] |
+| CLI 상태: (초록) available:1.2.3                  |
++--------------------------------------------------+
+| [웹 프로그램 개발]        | [데스크톱 프로그램...]  |
+| web-app-dev  6단계        | desktop-app-dev... 5단계|
+| ●요구사항 ●설계 ●프론트... | ●요구사항 ●설계 ●구현...|
+| [실행][편집]        [삭제]| [실행][편집]      [삭제]|
++--------------------------------------------------+
+```
+
+Replace the last sentence of §4.2 (lines 153-154) with:
+
+```markdown
+템플릿의 원시 JSON을 바로 확인할 수 있다. 편집 화면에는 **실행 버튼이 없다** — 저장은
+디스크에만 반영하며, 실행은 갤러리 카드의 **실행** 버튼에서 시작한다. 이렇게 분리해 둔
+덕분에 "실행하려다 원본 템플릿이 덮어써지는" 일이 생기지 않는다. 이 run에서만 쓰고 싶은
+수정은 저장하지 말고, 실행 화면의 실행 전 게이트에서 하면 된다.
+```
+
+Replace §4.3 in full (lines 156-170) with:
+
+```markdown
+### 4.3 파이프라인 실행 화면
+
+좌측에 단계 타임라인(대기/실행 전 대기/진행/체크포인트 대기/승인됨/실패를 점 색으로
+표시), 우측에 실시간 로그가 `pipeline://stage-event`를 통해 쌓인다.
+
+**(1) 실행 전 게이트 — 모든 단계에 매번 나타난다**
+
+run을 시작하면 아무것도 실행되지 않은 채 "다음 단계 — 실행 전 확인/수정" 패널이 먼저
+뜬다. 여기에는 해당 단계의 이름·ID·프롬프트·권한 모드·허용 도구·체크포인트 스위치가
+템플릿 값 그대로 채워져 있고, **단계 ID만 잠겨 있다**(바꾸면 실행 기록과 어긋난다).
+
+| 버튼 | 동작 |
+|---|---|
+| **이 단계 실행** | 화면에 보이는 내용 그대로 이 단계 하나만 실행한다 |
+| **이 run 취소** | run을 `cancelled`로 종료하고 갤러리로 돌아간다 |
+
+> 여기서 고친 내용은 **이 run에만** 적용되며 저장된 템플릿은 바뀌지 않는다. 반대로 하단의
+> **원본 템플릿 편집 (모든 향후 실행에 적용)** 버튼은 저장된 템플릿을 바꾸는 완전히 다른
+> 경로이며, 진행 중인 run에는 반영되지 않는다 — 눌렀을 때 확인 창이 한 번 뜬다.
+
+**(2) 체크포인트 — `checkpoint: true` 단계가 끝난 직후에만 나타난다**
+
+| 버튼 | 동작 |
+|---|---|
+| **승인** | 현재 단계를 완료 처리하고 **다음 단계의 실행 전 게이트로 돌아간다**(마지막 단계면 파이프라인 완료) |
+| **수정 요청 보내기** | 입력한 피드백 텍스트로 **같은 단계를 재실행**(원래 프롬프트를 완전히 대체). 이 피드백 텍스트는 어디에도 저장되지 않는다 |
+| **거부** | 프로세스를 다시 실행하지 않고 파이프라인 자체를 취소(cancelled) 처리 |
+
+변경된 파일 배지(Write/Edit 도구 호출에서 감지한 경로)가 체크포인트 카드 위에 같이
+표시되어, 승인 전에 무엇이 바뀌었는지 훑어볼 수 있다.
+
+**승인해도 다음 단계가 자동으로 시작되지 않는다** — 승인의 결과는 언제나 다음 단계의 실행 전
+게이트다. 단계 실행이 실패하면 run은 `failed`로 종료되며, 그 run에서는 재시도할 수 없다.
+프롬프트를 고쳐 다시 시도하려면 새 run을 시작해야 한다.
+```
+
+Replace the §6.1 data-location table (lines 192-195) with:
+
+```markdown
+| 데이터 | 경로 |
+|---|---|
+| 템플릿 | `<app_data_dir>/templates/{id}.json` |
+| 실행 기록/로그 | `<app_data_dir>/runs/{run_id}.json` |
+| 격리된 구 형식 실행 기록 | `<app_data_dir>/runs-legacy-v1/{run_id}.json` (앱이 읽지 않음) |
+| 프로젝트 로컬 매니페스트 | `<targetDir>/.claude-pipeline-wizard/run.json`, `pipeline.json` |
+```
+
+Replace the §8 bullet list (lines 248-256) with:
+
+```markdown
+- **새로 만든 폴더만 지원** — 템플릿은 사용자가 고른 폴더에 대해 실행되며, 이미
+  `.claude-pipeline-wizard/run.json`이 있는 폴더는 **거부된다**(덮어쓰지 않는다).
+  기존 코드베이스에 대해 실행하는 것은 아직 지원되지 않는다.
+- **재시작 후 재개(resume) UI 없음** — 실행 상태는 전이마다 디스크에 저장되지만,
+  **앱을 재시작한 뒤 진행 중이던 런에 다시 연결할 커맨드나 화면이 없다.** 오늘 기준
+  복구 방법은 `runs/` 디렉터리 아래의 JSON 파일을 직접 열어 확인하는 것뿐이다
+  (6.4절 참고).
+- **프로젝트 로컬 매니페스트는 조회를 쉽게 할 뿐 resume을 해결하지 않는다** —
+  `<targetDir>/.claude-pipeline-wizard/`가 매 전이마다 갱신되므로 폴더만 열어도 상태를
+  읽을 수 있지만, 앱은 이 파일을 **다시 읽어들이지 않는다.** 위 제약은 그대로다.
+- **구 형식 실행 기록은 열 수 없다** — 이 버전 최초 기동 시 `resolvedStages`가 없는 기존
+  레코드는 `runs-legacy-v1/`로 이동된다. 삭제되지는 않지만 앱에서 열 수는 없다.
+- **실패한 run은 종료 상태다** — 실패한 단계를 같은 run에서 다시 실행할 수 없다. 새 run을
+  시작해야 한다.
+- **순차 단계만 지원** — 템플릿 내에서 단계의 병렬 실행이나 조건 분기는 지원하지
+  않는다.
+```
+
+- [ ] **Step 5: Update `documents/api-design.md` and `documents/api-user-guide.md`**
+
+In `documents/api-design.md` §3, append four rows to the error table (after line 80):
+
+```markdown
+| `OrchestratorError::NotAwaitingStageStart` | `"run '{id}' is not awaiting a stage start"` | 게이트에 있지 않은 run에 `start_stage` 호출 |
+| `OrchestratorError::StaleStageIndex` | `"STALE_STAGE_INDEX: run is at stage {actual}, caller expected {expected}"` | 이미 지나간 게이트를 대상으로 한 `start_stage` 호출. **접두사가 계약이다** — 프론트엔드는 이 문자열로만 이 에러를 구분하고, `get_run`으로 조용히 재동기화한다 |
+| `OrchestratorError::StageIdMismatch` | `"stage override id '{got}' does not match resolved stage '{expected}'"` | `stageOverride.id`가 현재 단계 id와 다름 |
+| `OrchestratorError::TargetDirInUse` | `"target dir already contains a pipeline run: {path}"` | 이미 `.claude-pipeline-wizard/run.json`이 있는 폴더로 새 실행 시도 |
+| `OrchestratorError::NotCancellable` | `"run '{id}' cannot be cancelled in its current state"` | 이미 종료된 run에 `cancel_run` 호출 |
+```
+
+Replace `start_pipeline_run`'s 동작/응답/에러 block (lines 226-247) with (the outer fence here is four backticks so the nested JSON block survives — write only the inner content into the file):
+
+````markdown
+**동작**: 템플릿을 로드·검증하고 `targetDir`을 검증(절대 경로 요구, 없으면 생성)한 뒤
+`RunRecord`를 만들어 `runs/{runId}.json`과 `<targetDir>/.claude-pipeline-wizard/`에
+저장하고 반환한다. **어떤 `claude` 프로세스도 스폰하지 않으며**, run은 1단계의 실행 전
+게이트에서 멈춘다. 실제 실행은 `start_stage`가 담당한다.
+
+**성공 응답**: `RunRecord`
+```json
+{
+  "runId": "b3f1...",
+  "templateId": "web-app-dev",
+  "targetDir": "/Users/me/projects/my-new-app",
+  "status": "awaiting-stage-start",
+  "currentStageIndex": 0,
+  "stages": [
+    { "id": "requirements", "status": "awaiting-start", "sessionId": null, "log": [] },
+    { "id": "design", "status": "pending", "sessionId": null, "log": [] }
+  ],
+  "resolvedStages": [ /* Stage[] — 이 run이 실행할 단계 정의의 사본 */ ]
+}
+```
+
+**에러**: 템플릿을 찾을 수 없음, 상대 경로 `targetDir`, 폴더 생성 실패(`io error`),
+매니페스트 쓰기 실패, 그리고 이미 실행 기록이 있는 폴더(`target dir already contains a
+pipeline run`).
+````
+
+Insert three new command subsections after `start_pipeline_run` (after line 249's `---`) — again a four-backtick outer fence:
+
+````markdown
+#### `start_stage` — 게이트에 멈춘 단계를 하나 실행 (비동기)
+
+**요청**
+```ts
+invoke("start_stage", {
+  runId: "b3f1...",
+  expectedStageIndex: 0,
+  stageOverride: { id: "requirements", name: "요구사항", prompt: "이번엔 이렇게", permissionMode: "acceptEdits", allowedTools: ["Read"], checkpoint: true }
+})
+```
+
+| 파라미터 | 타입 | 설명 |
+|---|---|---|
+| `runId` | string | 대상 실행 id |
+| `expectedStageIndex` | number | **세대(generation) 가드.** 호출자가 화면에 렌더한 바로 그 `currentStageIndex`. run이 이미 다음 게이트로 넘어갔다면 `STALE_STAGE_INDEX:` 에러로 거부된다 |
+| `stageOverride` | `Stage \| null` | 이 실행에만 적용할 단계 정의. `id`는 현재 단계와 같아야 하며, 통과하면 `resolvedStages`의 해당 인덱스를 교체한다. `null`이면 현재 `resolvedStages` 값을 그대로 쓴다 |
+
+**동작**: run별 뮤텍스 안에서 상태·세대·단계 유효성을 검사하고 `RunRecord`를 `running`으로
+전이시켜 저장한 뒤, **락을 놓고** `claude` 프로세스를 정확히 하나 스폰한다. 종료 후 결과에
+따라 `awaiting-checkpoint` / 다음 게이트(`awaiting-stage-start`) / `completed` / `failed`로
+전이한다. **원본 템플릿 파일은 어떤 경우에도 쓰지 않는다.**
+
+**성공 응답**: 갱신된 `RunRecord`
+
+---
+
+#### `cancel_run` — 실행 취소 (동기)
+
+**요청**
+```ts
+invoke("cancel_run", { runId: "b3f1..." })
+```
+
+**동작**: `claude` 프로세스를 실행하지 않고 run 상태를 `cancelled`로 표시해 두 저장소에
+저장한다. 게이트나 체크포인트에서 언제든 호출할 수 있어, 사용자가 어느 지점에서도
+빠져나올 수 있게 한다.
+
+**성공 응답**: 갱신된 `RunRecord` (`status: "cancelled"`)
+**에러**: 이미 종료된 run이면 `"run '{id}' cannot be cancelled in its current state"`.
+
+---
+
+#### `get_run` — 실행 기록 단건 조회 (동기, 읽기 전용)
+
+**요청**
+```ts
+invoke("get_run", { runId: "b3f1..." })
+```
+
+**동작**: `runs/{runId}.json`을 읽어 그대로 반환한다. 상태를 바꾸지 않으므로 run 락을 잡지
+않는다. 프론트엔드는 `STALE_STAGE_INDEX:` 거부를 받은 직후 이 커맨드로 화면을 조용히
+재동기화한다.
+
+**성공 응답**: `RunRecord`
+**에러**: `"run '{id}' not found"`.
+
+---
+````
+
+In `documents/api-user-guide.md`, rewrite 시나리오 3 (lines 98-124) so it reflects the two-call flow — `startPipelineRun`으로 run을 만들고, 게이트마다 `startStage(runId, run.currentStageIndex, editedStage)`를 호출하며, 종료 상태가 될 때까지 반복 — and append the four new wrappers to the §4 API list (after line 194):
+
+```markdown
+| `startStage(runId, expectedStageIndex, stageOverride?)` | `start_stage` | 게이트에 멈춘 단계 하나를 실행. 두 번째 인자는 선택이 아니라 **세대 가드**이므로 화면이 렌더한 인덱스를 그대로 넘겨야 한다 |
+| `cancelRun(runId)` | `cancel_run` | 실행을 `cancelled`로 종료 |
+| `getRun(runId)` | `get_run` | 읽기 전용 재조회 |
+| `isStaleStageIndexError(error)` | — | `startStage` 거부가 세대 불일치인지 판별하는 유일한 지점. 참이면 에러를 띄우지 말고 `getRun`으로 화면을 갱신한다 |
+```
+
+- [ ] **Step 6: Update `documents/sequence-diagrams.md`, `class-diagram.md`, `er-diagram.md`**
+
+`documents/sequence-diagrams.md` §2 (lines 54-113): the current diagram shows `start_pipeline_run` spawning stage 1 and auto-advancing on approval. Replace its message sequence with the gate loop — `start_pipeline_run` returns `RunRecord(awaiting-stage-start)` with **no** `Executor` participant involved; a separate `start_stage` interaction spawns exactly one `claude` process; and both the non-checkpoint completion path and the `approve_checkpoint` path end with a `RunRecord(awaiting-stage-start, index+1)` return rather than another spawn. Add the manifest write as a message from `Orchestrator` to a new `ProjectManifest` participant on every transition, and keep §2.1 (수정 요청) and §3 (실패/타임아웃) — they are still accurate, except that §3's "다음 단계로 자동 진행되지 않는다" note now applies to every stage, not only failed ones.
+
+`documents/class-diagram.md`:
+- `class RunRecord` (lines 43-52): add `+Vec~Stage~ resolvedStages` and the four new methods `+currentResolvedStage() Stage`, `+applyStageOverride(stage) Result`, `+beginCurrentStage()`, `+advanceToGate(sessionId) bool`.
+- `class RunStatus` (line 63): add `AwaitingStageStart`. `class StageStatus` (line 70): add `AwaitingStart`.
+- `class Orchestrator` (lines 127-137): remove `drive()`, add `startStage(runId, expectedStageIndex, stageOverride)`, `runCurrentStage(...)`, `cancelRun(runId)`, `save(record)`, `saveWithRollback(record, snapshot)`, `lockFor(runId)`, and the `runLocks` field.
+- Add `class ProjectManifest` and `class StageOverrideError` with an `Orchestrator ..> ProjectManifest : 매 전이마다 씀` edge, and note in §"주요 설계 포인트" that the orchestrator no longer loops.
+
+`documents/er-diagram.md`:
+- In the mermaid block, add `Stage[] resolvedStages "이 run 전용 파이프라인 사본"` to `RUN_RECORD`, add `awaiting-start` / `awaiting-stage-start` to the status comments, and add a `PROJECT_MANIFEST` entity (`run.json`, `pipeline.json`) with a `RUN_RECORD ||--|| PROJECT_MANIFEST : "매 전이마다 미러링"` relation.
+- In §"관계별 상세 설명", add the point that `RunRecord.resolvedStages`는 `Template.stages`에서 **복사**된 뒤 독립적으로 변하며, 이 복사가 원본 템플릿 오염을 구조적으로 막는다.
+
+- [ ] **Step 7: Regenerate `documents/docs-portal.html`**
+
+The portal is a `dev-docs-builder-v2` artifact, but **no generator script is checked into this repository** — `scripts/` holds only `build/`, `dev/` and `installer/`. Confirm that first:
+
+```bash
+ls scripts/
+grep -rl "docs-portal" --include=*.sh --include=*.bat --include=*.ps1 --include=*.js . | grep -v node_modules
+```
+Expected: no generator. If one turns up, run it instead of hand-editing and skip to the verification below.
+
+Otherwise edit the HTML directly. The portal inlines each markdown file as an HTML `<section>`; mirror Steps 2-6 into the matching section, converting each edited block to the surrounding markup style (`<table>` rows, `<li>` bullets, `<pre class="mermaid">` for diagrams). The anchors:
+
+| Section | What to mirror | Current anchor |
+|---|---|---|
+| `#database-design` | the three-store table, `resolvedStages` rows, the whole new 2.3 including the D7 blockquote, the §3 rows, the §5 bullets | line 683 (`<h2>1. 저장소(테이블) 목록</h2>`), line 690 (the `runs/` row), line 780 (`<h2>5. "마이그레이션" 전략</h2>`) |
+| `#system-architecture` | the mermaid subgraphs and the rewritten §5 | line 1354 (`<h2>5. 데이터 흐름</h2>`), line 1360 (the "체크포인트가 설정돼 있으면 여기서 멈추고" list item — **this sentence must be gone**) |
+| `#user-guide` | §4.1/4.2/4.3, §6.1, §8 | line 1555 (`<h2>8. 알려진 v1 제약 사항</h2>`), lines 1558-1559 |
+| `#api-design`, `#api-user-guide`, `#sequence-diagrams`, `#class-diagram`, `#er-diagram` | Steps 5-6 | the corresponding `<section id=...>` starting at lines 263, 519, 853, 1034, 789 |
+
+The sidebar (line 247, "개발 문서 포털 · 8개 문서") is unchanged — no document is added or removed.
+
+Verify the sweep mechanically:
+
+```bash
+grep -c "awaiting-stage-start" documents/docs-portal.html
+grep -n "체크포인트가 설정돼 있으면 여기서 멈추고" documents/docs-portal.html
+grep -c "claude-pipeline-wizard" documents/docs-portal.html
+grep -rn "편집 화면의 실행 버튼" documents/ README.md
+```
+Expected: the first ≥ 3, the second **no match**, the third ≥ 3, the fourth **no match** (that phrase described the entry point decision D2 removed).
+
+- [ ] **Step 8: Verify nothing regressed**
+
+Run: `npm test`
+Run: `npx tsc --noEmit`
+Run: `cargo test --manifest-path src-tauri/Cargo.toml`
+Expected: all PASS, unchanged from Task 15. This task edits no source, so any failure here means something else is wrong — stop and fix it before committing documentation that claims the app works.
+
+- [ ] **Step 9: Run the manual smoke on the real CLI (PRD F-2 / TRD §5.4)**
+
+This is the one part of the plan the automated suites cannot cover: every backend test runs against `mock_claude`, so nothing so far has proven the gate works with a real `claude` process. Run it against a **new, empty folder** — not one an earlier attempt already used, or (c) will be a `TargetDirInUse` refusal instead.
+
+```bash
+npx tauri dev
+```
+
+Then walk the five items and tick each only after seeing the pass condition with your own eyes:
+
+- [ ] **(a) 템플릿 실행 시작** — gallery → **실행** → pick an empty folder.
+      Pass: the **1단계 편집 패널**("다음 단계 — 실행 전 확인/수정") appears with *no process having run*, and the live log area is empty. If any log line appears before you press anything, `start_run` is still spawning and PRD A-1 fails.
+- [ ] **(b) 1단계 프롬프트를 알아볼 수 있게 수정 후 '이 단계 실행'** — e.g. append
+      "그리고 파일 맨 위에 SMOKE-B 라고 적어라".
+      Pass: the live log shows the *edited* prompt's effect (the marker appears), not the template's original behaviour. Then confirm `templates/{id}.json` on disk is **unchanged** — that is PRD C-1 observed rather than asserted.
+- [ ] **(c) targetDir을 파일 탐색기로 열어본다**
+      Pass: `.claude-pipeline-wizard/run.json` and `pipeline.json` both exist; `pipeline.json` contains the **edited** stage-1 prompt from (b); and the files' contents change again after the next transition.
+- [ ] **(d) `checkpoint: false` 단계 종료를 기다린다** — use a template whose stage has the checkpoint switch off (or turn it off at that stage's gate).
+      Pass: when the stage ends, the app **returns to the next stage's edit panel** and starts nothing on its own.
+- [ ] **(e) 체크포인트 단계에서 '승인'**
+      Pass: approving likewise lands on the **next stage's edit panel**, not in a running stage.
+
+Also spot-check the two escape hatches while you are here: **이 run 취소** at any gate returns to the gallery with the run marked `cancelled`, and a second **실행** against the same folder is refused with the `target dir already contains a pipeline run` message rather than silently overwriting (a) through (c)'s manifest.
+
+If any item fails, it is a defect in Tasks 7-15, not in the documentation — fix it there and re-run this step before committing.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add README.md documents/
+git commit -m "docs: describe the pre-stage gate, the third store, and what is not recorded
+
+Every stage now stops before it runs and the target folder carries a manifest, so
+the README's 'pauses at checkpoints' story and documents/'s two-store model were
+both stale. README gets the gate flow, the new engine and component files, and
+three added limitations: the manifest aids inspection but does not make a run
+resumable, pre-resolvedStages records are quarantined rather than read, and a
+folder that already holds a run is refused.
+
+database-design.md gains the project-local manifest as a third store and, per
+IMP-020, states in writing that the manifest is a snapshot of the pipeline
+definition and not an audit log — request_changes feedback prompts are recorded
+nowhere. That sentence is the whole deliverable of TRD 6.7 option C; without it
+the decision is merely unmade. system-architecture.md's single stop point becomes
+two, and user-guide.md documents the gate's two buttons and the fact that approving
+a checkpoint lands on the next gate rather than in the next process.
+
+Closes the PRD F-2 manual smoke (a)-(e), run against the real CLI."
+```

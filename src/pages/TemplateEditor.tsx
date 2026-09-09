@@ -1,16 +1,14 @@
 import { useState } from "react";
 import { saveTemplate } from "../api";
-import type { PermissionMode, Stage, Template } from "../types";
+import StageFields from "../components/StageFields";
+import type { Stage, Template } from "../types";
 
 interface Props {
   initial: Template | null;
   onSaved: (template: Template) => void;
-  onRun: (template: Template) => void;
   onCancel: () => void;
 }
 
-const PERMISSION_MODES: PermissionMode[] = ["acceptEdits", "bypassPermissions", "default"];
-const KNOWN_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebSearch", "WebFetch"];
 const ID_PATTERN = /^(?!\.\.?$)[A-Za-z0-9._-]+$/;
 
 function emptyStage(index: number): Stage {
@@ -37,7 +35,7 @@ function validate(template: Template): string | null {
   return null;
 }
 
-export default function TemplateEditor({ initial, onSaved, onRun, onCancel }: Props) {
+export default function TemplateEditor({ initial, onSaved, onCancel }: Props) {
   const [template, setTemplate] = useState<Template>(
     initial ?? { id: `template-${Date.now()}`, name: "", description: "", stages: [] }
   );
@@ -89,27 +87,21 @@ export default function TemplateEditor({ initial, onSaved, onRun, onCancel }: Pr
     });
   };
 
-  const persistTemplate = async (): Promise<boolean> => {
-    if (error) return false;
+  // IMP-012 (decision D2): there is deliberately no run path here any more. Keeping a
+  // shared persistTemplate() helper with one caller would just invite the save-then-run
+  // coupling back, so it is folded into the only action the editor still performs.
+  const handleSave = async () => {
+    if (error) return;
     setSaveError(null);
     setBusy(true);
     try {
       await saveTemplate(template);
-      return true;
+      onSaved(template);
     } catch (e) {
       setSaveError(String(e));
-      return false;
     } finally {
       setBusy(false);
     }
-  };
-
-  const handleSave = async () => {
-    if (await persistTemplate()) onSaved(template);
-  };
-
-  const handleRun = async () => {
-    if (await persistTemplate()) onRun(template);
   };
 
   return (
@@ -147,11 +139,8 @@ export default function TemplateEditor({ initial, onSaved, onRun, onCancel }: Pr
           <button className="btn btn-outline" onClick={onCancel}>
             취소
           </button>
-          <button className="btn btn-outline" onClick={handleSave} disabled={!!error || busy}>
+          <button className="btn btn-success" onClick={handleSave} disabled={!!error || busy}>
             저장
-          </button>
-          <button className="btn btn-success" onClick={handleRun} disabled={!!error || busy}>
-            실행
           </button>
         </div>
       </div>
@@ -203,95 +192,13 @@ export default function TemplateEditor({ initial, onSaved, onRun, onCancel }: Pr
                 </button>
               </div>
 
-              <div style={{ display: "flex", gap: 12, marginBottom: 12 }}>
-                <label className="field" style={{ flex: 1 }}>
-                  <span>단계 이름</span>
-                  <input
-                    id={`stage-name-${selectedIndex}`}
-                    className="input"
-                    value={selectedStage.name}
-                    onChange={(e) => updateStage(selectedIndex, { name: e.target.value })}
-                  />
-                </label>
-                <label className="field" style={{ flex: 1 }}>
-                  <span>단계 ID</span>
-                  <input
-                    id={`stage-id-${selectedIndex}`}
-                    className="input mono"
-                    value={selectedStage.id}
-                    onChange={(e) => updateStage(selectedIndex, { id: e.target.value })}
-                  />
-                </label>
-              </div>
-
-              <div className="field" style={{ marginBottom: 12 }}>
-                <label htmlFor={`stage-prompt-${selectedIndex}`}>단계 {selectedIndex + 1} 프롬프트</label>
-                <textarea
-                  id={`stage-prompt-${selectedIndex}`}
-                  className="textarea"
-                  rows={4}
-                  value={selectedStage.prompt}
-                  onChange={(e) => updateStage(selectedIndex, { prompt: e.target.value })}
-                />
-                <span className="help-text">스킬/에이전트는 프롬프트에서 이름으로 지정합니다.</span>
-              </div>
-
-              <div style={{ marginBottom: 12 }}>
-                <div className="section-label">권한 모드</div>
-                <div className="segmented">
-                  {PERMISSION_MODES.map((mode) => (
-                    <button
-                      key={mode}
-                      className={`segmented__option ${
-                        selectedStage.permissionMode === mode ? "segmented__option--selected" : ""
-                      }`}
-                      onClick={() => updateStage(selectedIndex, { permissionMode: mode })}
-                    >
-                      {mode}
-                    </button>
-                  ))}
-                </div>
-                <p className="help-text" style={{ marginTop: 6 }}>
-                  헤드리스 실행이므로 단계 중간에는 권한 질문에 답할 수 없습니다.
-                </p>
-              </div>
-
-              <div style={{ marginBottom: 16 }}>
-                <div className="section-label">허용 도구</div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                  {KNOWN_TOOLS.map((tool) => {
-                    const selected = selectedStage.allowedTools.includes(tool);
-                    return (
-                      <button
-                        key={tool}
-                        className={`chip ${selected ? "chip--selected" : ""}`}
-                        onClick={() => {
-                          const allowedTools = selected
-                            ? selectedStage.allowedTools.filter((t) => t !== tool)
-                            : [...selectedStage.allowedTools, tool];
-                          updateStage(selectedIndex, { allowedTools });
-                        }}
-                      >
-                        {tool}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="switch-row">
-                <button
-                  className={`switch ${selectedStage.checkpoint ? "switch--on" : ""}`}
-                  onClick={() => updateStage(selectedIndex, { checkpoint: !selectedStage.checkpoint })}
-                  aria-label="체크포인트에서 일시 정지"
-                >
-                  <span className="switch__knob" />
-                </button>
-                <div>
-                  <p className="switch-row__title">체크포인트에서 일시 정지</p>
-                  <p className="switch-row__desc">이 단계가 끝나면 승인 전까지 다음 단계로 넘어가지 않습니다.</p>
-                </div>
-              </div>
+              <StageFields
+                stage={selectedStage}
+                onChange={(patch) => updateStage(selectedIndex, patch)}
+                idPrefix={`stage-${selectedIndex}`}
+                promptLabel={`단계 ${selectedIndex + 1} 프롬프트`}
+                lockId={false}
+              />
 
               <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
                 <button
