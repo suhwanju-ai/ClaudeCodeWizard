@@ -399,4 +399,81 @@ mod tests {
         r.run_id = "../../../etc/passwd".to_string();
         assert!(matches!(store.save(&r), Err(RunRecordStoreError::InvalidId(_))));
     }
+
+    /// U-G4 — IMP-027 / PRD G-4: file browsing must not add or rename a single state.
+    /// This test fails on ANY change to the serialized value list, which is the point.
+    #[test]
+    fn run_status_and_stage_status_serde_values_are_frozen() {
+        let run: Vec<String> = [
+            RunStatus::Running,
+            RunStatus::AwaitingStageStart,
+            RunStatus::AwaitingCheckpoint,
+            RunStatus::Completed,
+            RunStatus::Failed,
+            RunStatus::Cancelled,
+        ]
+        .iter()
+        .map(|s| serde_json::to_string(s).unwrap())
+        .collect();
+        assert_eq!(
+            run,
+            [
+                "\"running\"",
+                "\"awaiting-stage-start\"",
+                "\"awaiting-checkpoint\"",
+                "\"completed\"",
+                "\"failed\"",
+                "\"cancelled\""
+            ]
+        );
+
+        let stage: Vec<String> = [
+            StageStatus::Pending,
+            StageStatus::AwaitingStart,
+            StageStatus::Running,
+            StageStatus::AwaitingCheckpoint,
+            StageStatus::Approved,
+            StageStatus::Failed,
+        ]
+        .iter()
+        .map(|s| serde_json::to_string(s).unwrap())
+        .collect();
+        assert_eq!(
+            stage,
+            [
+                "\"pending\"",
+                "\"awaiting-start\"",
+                "\"running\"",
+                "\"awaiting-checkpoint\"",
+                "\"approved\"",
+                "\"failed\""
+            ]
+        );
+
+        // The list above freezes the values that exist; it cannot notice a *new* variant
+        // on its own. These exhaustive matches can: adding a variant to either enum makes
+        // this test fail to compile (TRD 9.5-(2) limitation note).
+        fn assert_run_status_is_exhaustive(s: &RunStatus) {
+            match s {
+                RunStatus::Running
+                | RunStatus::AwaitingStageStart
+                | RunStatus::AwaitingCheckpoint
+                | RunStatus::Completed
+                | RunStatus::Failed
+                | RunStatus::Cancelled => {}
+            }
+        }
+        fn assert_stage_status_is_exhaustive(s: &StageStatus) {
+            match s {
+                StageStatus::Pending
+                | StageStatus::AwaitingStart
+                | StageStatus::Running
+                | StageStatus::AwaitingCheckpoint
+                | StageStatus::Approved
+                | StageStatus::Failed => {}
+            }
+        }
+        assert_run_status_is_exhaustive(&RunStatus::Running);
+        assert_stage_status_is_exhaustive(&StageStatus::Pending);
+    }
 }
