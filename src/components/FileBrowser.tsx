@@ -87,7 +87,11 @@ export default function FileBrowser({ run, confirmed, changedFiles }: FileBrowse
           setNotice("이 run의 폴더 밖은 볼 수 없습니다.");
           setPath("");
         } else {
+          // The breadcrumb has already advanced to the new path (enter() ran before this
+          // fetch failed), so leaving the old listing in place would show it under a
+          // mismatched header — a direct contradiction of "파일시스템 실측".
           setError(String(e));
+          setListing(null);
         }
       })
       .finally(() => {

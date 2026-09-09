@@ -136,6 +136,20 @@ describe("FileBrowser", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("io error: disk on fire");
   });
 
+  it("clears the old listing on a generic error instead of showing stale entries under the new breadcrumb", async () => {
+    vi.mocked(listProjectDir)
+      .mockResolvedValueOnce(rootListing)
+      .mockRejectedValueOnce("io error: permission denied");
+
+    render(<FileBrowser run={run} confirmed changedFiles={[]} />);
+    await screen.findByRole("button", { name: "src" });
+    fireEvent.click(screen.getByRole("button", { name: "src" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("io error: permission denied");
+    expect(screen.queryByRole("button", { name: "src" })).not.toBeInTheDocument();
+    expect(screen.queryByText("main.rs")).not.toBeInTheDocument();
+  });
+
   it("marks entries that the run log says were changed", async () => {
     vi.mocked(listProjectDir).mockResolvedValue(rootListing);
     render(<FileBrowser run={run} confirmed changedFiles={["/tmp/proj/main.rs"]} />);
