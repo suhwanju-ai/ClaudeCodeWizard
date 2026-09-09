@@ -73,6 +73,7 @@ cargo clippy --all-targets
 src/                      React frontend
   components/
     StageFields.tsx       The one stage form, shared by the editor and the run gate
+    FileBrowser.tsx       Read-only listing of the run's targetDir, one directory at a time
   pages/
     TemplateGallery.tsx   Browse, run, edit, delete templates
     TemplateEditor.tsx    Form-based stage editor (add/remove/reorder, validation)
@@ -85,6 +86,7 @@ src-tauri/src/
   engine/
     run_record.rs         Run state machine (RunRecord/StageRun, gate + checkpoint transitions)
     project_manifest.rs   Writes <targetDir>/.claude-pipeline-wizard/{run,pipeline}.json
+    project_files.rs      targetDir containment check + non-recursive directory listing
     legacy_migration.rs   One-shot startup quarantine of pre-resolvedStages run records
     stream_json.rs        Parser for the claude CLI's stream-json output
     executor.rs            Spawns the claude CLI per stage, streams events, enforces a timeout

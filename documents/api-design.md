@@ -80,6 +80,9 @@ JS 쪽 Promise로 매핑한다.
 | `OrchestratorError::StageIdMismatch` | `"stage override id '{got}' does not match resolved stage '{expected}'"` | `stageOverride.id`가 현재 단계 id와 다름 |
 | `OrchestratorError::TargetDirInUse` | `"target dir already contains a pipeline run: {path}"` | 이미 `.claude-pipeline-wizard/run.json`이 있는 폴더로 새 실행 시도 |
 | `OrchestratorError::NotCancellable` | `"run '{id}' cannot be cancelled in its current state"` | 이미 종료된 run에 `cancel_run` 호출 |
+| `ProjectFilesError::OutsideTargetDir` | `"PATH_OUTSIDE_TARGET_DIR: {path}"` | `list_project_dir`에 targetDir 밖을 가리키는 경로(`../`, 절대 경로, 밖을 가리키는 심볼릭 링크)가 들어옴. **접두사가 계약이다** — `src/api.ts`의 `isPathOutsideTargetDirError`가 이 문자열로만 구분하고, 프론트는 루트로 되돌아가며 원시 경로를 노출하지 않는다. `project_files.rs` |
+| `ProjectFilesError::NotFound` | `"PATH_NOT_FOUND: {path}"` | 나열 중 대상 폴더가 사라짐(실행 중인 claude가 지운 경우 포함). **접두사가 계약이다** — `isPathNotFoundError`가 이를 보고 에러 배너 대신 상위 폴더 복귀 + 재시도를 수행한다. `project_files.rs` |
+| `ProjectFilesError::NotADirectory` / `TargetDirUnavailable` | `"path is not a directory: {path}"` / `"target dir is unavailable: {path}"` | 파일을 디렉토리로 나열 시도 / targetDir 자체를 열 수 없음. 프론트가 다르게 반응할 이유가 없어 prefix를 주지 않는다 |
 | I/O 계열 | `"io error: ..."` | 디스크 읽기/쓰기 실패 |
 | JSON 계열 | `"json error: ..."` | 저장된 JSON 파일 파싱 실패(손상) |
 | `claude` 프로세스 실패 | `StageEvent::ProcessError { exitCode, stderr }` (이벤트로 전달, `Result` 반환값 아님) | CLI 비정상 종료, 타임아웃(30분), stdout 읽기 실패 |
@@ -363,6 +366,52 @@ invoke("reject_checkpoint", { runId: "b3f1..." })
 **성공 응답**: 갱신된 `RunRecord` (`status: "cancelled"`)
 
 **에러**: `approve_checkpoint`와 동일한 상태 검증 규칙.
+
+---
+
+### 4.4 프로젝트 파일 (읽기 전용)
+
+> **타입 미러 동기화 책임.** 아래 `DirListing`·`DirEntry`·`EntryKind`는 `src-tauri/src/engine/project_files.rs`의 Rust 정의와 `src/types.ts`의 TypeScript 정의가 **손으로 맞춘 1:1 미러**다. 어느 한쪽을 바꾸는 커밋은 **같은 커밋에서** 반대쪽도 바꾼다. 규약은 Rust snake_case 필드 + `#[serde(rename_all = "camelCase")]`, TS camelCase이며, 열거형은 Rust `PascalCase` 변형 + `#[serde(rename_all = "kebab-case")]`, TS kebab-case 문자열 리터럴 유니온이다. 직렬화 키 이름은 `dir_listing_serializes_with_the_camel_case_keys_the_ts_mirror_expects` 테스트가 고정한다.
+
+#### `list_project_dir` — run의 targetDir 하위 디렉토리 한 단계 나열
+
+**요청**
+
+```json
+{ "runId": "5f1c…", "subPath": "src/engine" }
+```
+
+- `subPath`는 **`run.targetDir` 기준 상대 경로**다. `""`이면 targetDir 자신을 가리킨다. 구분자는 `/`·`\` 둘 다 받으며 백엔드가 `/`로 정규화한다.
+- **프론트는 탐색 루트를 지정할 수 없다.** 루트는 백엔드가 `run_store.load(runId).target_dir`에서 직접 유도한다. `target_dir`을 인자로 받으면 containment 검사가 호출자가 정한 루트에 대해서만 성립해 방어가 되지 않기 때문이다.
+- `..`는 어떤 위치에서도 거부된다. 상위 이동은 프론트가 경로를 잘라 다시 호출하는 방식으로 구현한다.
+
+**응답** — `DirListing`
+
+```json
+{
+  "path": "src/engine",
+  "entries": [
+    { "name": "orchestrator.rs", "kind": "file", "size": 21033, "modifiedMs": 1757400000000 },
+    { "name": "project_files.rs", "kind": "file", "size": 6120, "modifiedMs": 1757400500000 }
+  ]
+}
+```
+
+| 필드 | 타입 | 설명 |
+|---|---|---|
+| `path` | `string` | targetDir 기준 정규화된 상대 경로. 항상 `/` 구분자, 루트는 `""`. 절대 경로도 Windows `\\?\` 접두사도 여기 들어가지 않는다 |
+| `entries[].name` | `string` | 엔트리 이름(경로 아님) |
+| `entries[].kind` | `"file" \| "directory" \| "symlink" \| "other"` | 심볼릭 링크는 링크로 보고되며 대상을 따라가지 않는다 |
+| `entries[].size` | `number \| null` | 파일만. 디렉토리·링크·읽기 실패는 `null` |
+| `entries[].modifiedMs` | `number \| null` | Unix epoch 밀리초. 플랫폼이 주지 않으면 `null` |
+
+**정렬**: 디렉토리가 먼저, 그다음 나머지. 각 묶음 안에서는 이름 오름차순.
+
+**범위와 불변식**
+
+- **비재귀** — 한 번의 호출은 한 디렉토리만 나열한다.
+- **읽기 전용** — 파일 내용을 읽는 커맨드도, 쓰는 커맨드도 존재하지 않는다(PRD §7 GAP-F1 결정, 2026-09-09). 이 커맨드는 `get_run`과 같이 run lock을 잡지 않고 상태를 저장하지 않는다.
+- **무필터** — `.claude-pipeline-wizard/`를 포함해 디렉토리의 모든 엔트리를 반환한다. 숨김 여부는 프론트 렌더 계층의 결정이다.
 
 ---
 

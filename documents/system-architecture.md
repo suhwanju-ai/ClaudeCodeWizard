@@ -101,7 +101,8 @@ graph TD
 | `Executor` (`engine/executor.rs`) | Rust + `tokio::process` | `claude` 자식 프로세스 스폰, stdout을 줄 단위로 비동기 파싱, 30분 타임아웃 강제 |
 | `TemplateStore` / `RunRecordStore` | Rust + `serde_json` | JSON 파일 기반 CRUD, id 검증(path traversal 방지) — → [DB 설계 문서](database-design.md) |
 | `cli_check.rs` | Rust | `claude --version` 실행 결과로 CLI 설치 여부 판별 |
-| `project_manifest` (`engine/project_manifest.rs`) | Rust + `serde_json` | 대상 폴더 검증(절대 경로 요구)과 `<targetDir>/.claude-pipeline-wizard/{run,pipeline}.json` 쓰기. 상태 머신을 모르며, 넘겨받은 `RunRecord`를 직렬화할 뿐이다 |
+| `project_manifest` (`engine/project_manifest.rs`) | Rust + `serde_json` | 대상 폴더 검증(절대 경로 요구)과 `<targetDir>/.claude-pipeline-wizard/{run,pipeline}.json` 쓰기 — targetDir에 쓰는 유일한 경로이며, 읽기 전용 나열(`project_files.rs`)과는 별개다. 상태 머신을 모르며, 넘겨받은 `RunRecord`를 직렬화할 뿐이다 |
+| `engine/project_files.rs` | Rust | targetDir 하위 경로 containment 검증(`resolve_within`)과 비재귀 디렉토리 나열(`list_dir`). `RunRecord`/`RunStatus`를 import하지 않는다 — 상태를 바꿀 수 없는 순수 부수 모듈 |
 | `legacy_migration` (`engine/legacy_migration.rs`) | Rust | 기동 시 1회, `resolvedStages`가 없는 구 형식 run 레코드를 `runs-legacy-v1/`로 이동. 실패해도 기동을 막지 않는다 |
 | `claude` CLI | 외부 프로세스 (사용자 PATH) | 실제 AI 추론/도구 실행을 수행. 이 앱은 이 프로세스의 입출력만 다룬다 |
 | `mock_claude` (`bin/mock_claude.rs`) | Rust 테스트 바이너리 | Rust 통합 테스트에서 `claude` CLI를 대체하는 결정적 스텁 |
@@ -179,6 +180,7 @@ graph LR
 | 성능 | 단계당 `claude` 프로세스 stdout을 줄 단위로 즉시 파싱·emit — UI 반영 지연은 프로세스 자체의 출력 속도에 의존 |
 | 타임아웃 | 단계 하나가 30분(`STAGE_TIMEOUT`) 동안 stdout 출력이 없으면 강제 종료 |
 | 보안 — 경로 검증 | 템플릿 id/단계 id/실행 id 모두 `is_valid_id()`로 검증해 `..`, `/` 등을 이용한 path traversal을 방지 |
+| 보안 — 앱 자체의 파일 접근 범위 | 프론트엔드에 파일시스템 권한을 부여하지 않는다 — `capabilities/default.json`의 `permissions`는 `["core:default", "dialog:allow-open"]`뿐이고 `tauri-plugin-fs`를 쓰지 않는다(`src-tauri/tests/capabilities_test.rs`가 CI에서 강제). 폴더 내용 조회 경로는 `list_project_dir` 커맨드 **하나뿐**이며, 탐색 루트는 프론트가 지정할 수 없고 `run.targetDir`로 고정된다. 하위 경로 containment는 `engine::project_files::resolve_within`이 세그먼트 검사 + canonical prefix 비교 2단으로 수행한다. **파일을 기록하는 커맨드는 존재하지 않는다**(읽기 전용, IMP-026) |
 | 보안 — 프로세스 권한 | `permissionMode`(`acceptEdits`/`bypassPermissions`/`default`)를 통해 `claude` CLI 자체의 파일 수정 권한 정책을 단계별로 제어. 헤드리스 실행이라 도중에 대화형으로 권한을 승인할 수 없다는 제약이 있음 |
 | 보안 — 자격증명 | 이 앱은 API 키/토큰을 직접 다루지 않는다 — 인증은 사용자가 이미 로그인해 둔 `claude` CLI에 위임됨 |
 | 확장성 | 단일 사용자 로컬 앱이므로 수평 확장 개념이 적용되지 않음. 여러 run을 동시에 열 수 있으며, run 하나의 load-check-save 구간은 run별 `tokio::sync::Mutex`로 직렬화된다(자식 프로세스 대기 구간에는 락을 잡지 않는다) |
