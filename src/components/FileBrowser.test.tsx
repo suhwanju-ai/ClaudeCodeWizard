@@ -162,6 +162,16 @@ describe("FileBrowser", () => {
     expect(await screen.findByText("이 폴더는 비어 있습니다.")).toBeInTheDocument();
   });
 
+  it("re-fetches the current path when 새로고침 is clicked", async () => {
+    vi.mocked(listProjectDir).mockResolvedValue(rootListing);
+    render(<FileBrowser run={run} confirmed changedFiles={[]} />);
+    await waitFor(() => expect(listProjectDir).toHaveBeenCalledWith("run1", ""));
+
+    fireEvent.click(await screen.findByRole("button", { name: "새로고침" }));
+    await waitFor(() => expect(listProjectDir).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(listProjectDir).mock.calls[1]).toEqual(["run1", ""]);
+  });
+
   // F-G14 (component half) — IMP-034. Nothing is queried before the record is confirmed.
   it("does not call the command before the run is confirmed", () => {
     render(<FileBrowser run={run} confirmed={false} changedFiles={[]} />);

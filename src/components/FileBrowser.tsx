@@ -61,6 +61,7 @@ export default function FileBrowser({ run, confirmed, changedFiles }: FileBrowse
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [refreshNonce, setRefreshNonce] = useState(0);
 
   useEffect(() => {
     // IMP-034: before the backend has answered, targetDir has been through neither
@@ -100,7 +101,7 @@ export default function FileBrowser({ run, confirmed, changedFiles }: FileBrowse
     return () => {
       cancelled = true;
     };
-  }, [run.runId, path, confirmed]);
+  }, [run.runId, path, confirmed, refreshNonce]);
 
   const enter = (name: string) => {
     setNotice(null);
@@ -139,6 +140,13 @@ export default function FileBrowser({ run, confirmed, changedFiles }: FileBrowse
           </span>
         ))}
         <span style={{ flex: 1 }} />
+        <button
+          className="btn btn-outline"
+          onClick={() => setRefreshNonce((n) => n + 1)}
+          disabled={loading}
+        >
+          새로고침
+        </button>
         <button className="btn btn-outline" onClick={goUp} disabled={path === ""}>
           상위로
         </button>
