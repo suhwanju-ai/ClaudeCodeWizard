@@ -124,6 +124,18 @@ pub async fn resolve_within(root: &Path, sub_path: &str) -> Result<PathBuf, Proj
     Ok(canonical)
 }
 
+/// Classifies a directory entry's file type, treating an unreadable or indeterminate
+/// type as `Other` rather than an error. Extracted so it can be unit-tested without a
+/// live, racily-unreadable filesystem entry.
+fn classify_entry_kind(file_type: Option<std::fs::FileType>) -> EntryKind {
+    match file_type {
+        Some(ft) if ft.is_symlink() => EntryKind::Symlink,
+        Some(ft) if ft.is_dir() => EntryKind::Directory,
+        Some(ft) if ft.is_file() => EntryKind::File,
+        _ => EntryKind::Other,
+    }
+}
+
 /// Lists exactly one directory level. Deliberately non-recursive (TRD 9.2-(5)):
 /// recursion invites symlink loops, it would make GAP-F2's blast radius unbounded, and
 /// a flat list plus a breadcrumb needs no tree library.
@@ -136,17 +148,12 @@ pub async fn list_dir(root: &Path, sub_path: &str) -> Result<DirListing, Project
     while let Some(entry) = read_dir.next_entry().await? {
         let name = entry.file_name().to_string_lossy().to_string();
         // `file_type()` on a directory entry does not follow the link, so a symlink is
-        // reported as itself (PRD G-1(b) support).
-        let file_type = entry.file_type().await?;
-        let kind = if file_type.is_symlink() {
-            EntryKind::Symlink
-        } else if file_type.is_dir() {
-            EntryKind::Directory
-        } else if file_type.is_file() {
-            EntryKind::File
-        } else {
-            EntryKind::Other
-        };
+        // reported as itself (PRD G-1(b) support). The browsed directory can be actively
+        // written by a running claude CLI stage, so a single entry that vanishes or
+        // becomes briefly unreadable between `read_dir` and this call is normal, not
+        // exceptional — it must not abort the whole listing (classified as `Other`).
+        let file_type = entry.file_type().await.ok();
+        let kind = classify_entry_kind(file_type);
         let metadata = entry.metadata().await.ok();
         let size = match (kind, &metadata) {
             (EntryKind::File, Some(m)) => Some(m.len()),
@@ -321,5 +328,17 @@ mod tests {
             json,
             r#"{"path":"src","entries":[{"name":"engine","kind":"directory","size":null,"modifiedMs":null},{"name":"main.rs","kind":"file","size":12,"modifiedMs":1}]}"#
         );
+    }
+
+    /// Covers the fix for the Important review finding: a single entry whose
+    /// `file_type()` cannot be determined must not abort the whole listing — it is
+    /// classified as `Other` and every other entry is still returned. A real
+    /// permission-denied fixture is awkward to construct portably (and behaves
+    /// differently on Windows vs. Unix), so this exercises the extracted
+    /// classification function directly with `None`, which is exactly the input
+    /// `list_dir` now passes it when `entry.file_type().await` errors.
+    #[test]
+    fn classify_entry_kind_treats_indeterminate_file_type_as_other() {
+        assert_eq!(classify_entry_kind(None), EntryKind::Other);
     }
 }
