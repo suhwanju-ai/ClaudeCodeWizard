@@ -634,6 +634,25 @@ async fn reject_checkpoint_rejects_a_run_not_awaiting_checkpoint() {
     assert!(matches!(result, Err(OrchestratorError::NotAwaitingCheckpoint(ref id)) if id == "run1"), "got {result:?}");
 }
 
+// Closure of a pre-existing gap flagged in Task 9: reject_checkpoint's success path
+// (Cancelled + manifest refresh, since Task 9 routed its save call through self.save())
+// had no test.
+#[tokio::test]
+async fn reject_checkpoint_from_awaiting_checkpoint_sets_cancelled_and_refreshes_manifest() {
+    let h = setup();
+    h.orchestrator.start_run("two-stage", h.target(), "run1".to_string()).unwrap();
+    h.orchestrator.start_stage("run1", 0, None, |_, _| {}).await.unwrap(); // now AwaitingCheckpoint
+    let before = std::fs::read_to_string(manifest_run_path(h.target_dir.path())).unwrap();
+
+    let record = h.orchestrator.reject_checkpoint("run1").unwrap();
+
+    assert_eq!(record.status, RunStatus::Cancelled);
+    assert_eq!(h.persisted("run1").status, RunStatus::Cancelled);
+    let after = std::fs::read_to_string(manifest_run_path(h.target_dir.path())).unwrap();
+    assert_ne!(before, after, "reject_checkpoint must refresh the manifest (PRD B-1)");
+    assert!(after.contains("\"cancelled\""));
+}
+
 fn template_file_bytes(h: &Harness, template_id: &str) -> Vec<u8> {
     // TemplateStore stores one JSON file per template, named by id.
     let path = h.template_dir.path().join(format!("{template_id}.json"));

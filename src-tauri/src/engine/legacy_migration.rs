@@ -41,7 +41,6 @@ pub fn quarantine_legacy_runs(runs_dir: &Path) -> Result<usize, std::io::Error> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::*;
 
     fn write(dir: &std::path::Path, name: &str, body: &str) {
         std::fs::create_dir_all(dir).unwrap();
