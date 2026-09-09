@@ -134,9 +134,17 @@ async fn listing_leaves_the_run_record_byte_identical() {
     assert_eq!(before, after);
 }
 
-/// T-G13 — the observable form of "it takes no run lock": the listing returns while a
-/// stage is still executing, instead of waiting for it. No wall-clock threshold is
-/// asserted, only that the listing succeeded while the run was Running.
+/// T-G13 — proves listing does not wait for the stage to *complete* (it isn't
+/// accidentally awaiting the same future/handle the running stage is on).
+///
+/// This does NOT prove list_project_dir avoids `lock_for`: that mutex's critical
+/// section (orchestrator.rs steps 1-5) is released before the child process spawns
+/// (see orchestrator.rs's own "lock released here — before the spawn" comment), so by
+/// the time this test's 500ms-delayed listing call fires, the lock has been free
+/// regardless of what list_project_dir does. A regression that added lock_for to
+/// list_project_dir would still pass this test. Lock-avoidance is instead guaranteed
+/// structurally: list_project_dir never calls lock_for or save (see its own doc
+/// comment in orchestrator.rs).
 #[tokio::test]
 async fn listing_does_not_block_on_a_running_stage() {
     let harness = setup_with(one_stage_template("project_files_slow_stage.jsonl"));
