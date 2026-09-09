@@ -20,6 +20,9 @@ import {
   cancelRun,
   getRun,
   isStaleStageIndexError,
+  listProjectDir,
+  isPathOutsideTargetDirError,
+  isPathNotFoundError,
 } from "./api";
 import type { Stage, Template } from "./types";
 
@@ -152,5 +155,25 @@ describe("api wrapper", () => {
     expect(isStaleStageIndexError("run 'run1' is not awaiting a stage start")).toBe(false);
     expect(isStaleStageIndexError(null)).toBe(false);
     expect(isStaleStageIndexError(undefined)).toBe(false);
+  });
+
+  // F-G-api — PRD G-19/G-20.
+  it("listProjectDir invokes list_project_dir with camelCase args", async () => {
+    invokeMock.mockResolvedValue({ path: "", entries: [] });
+    const result = await listProjectDir("run1", "src/engine");
+    expect(invokeMock).toHaveBeenCalledWith("list_project_dir", { runId: "run1", subPath: "src/engine" });
+    expect(result).toEqual({ path: "", entries: [] });
+  });
+
+  it("recognizes the two project-file error prefixes and nothing else", () => {
+    expect(isPathOutsideTargetDirError("PATH_OUTSIDE_TARGET_DIR: ../secret.txt")).toBe(true);
+    expect(isPathOutsideTargetDirError(new Error("PATH_OUTSIDE_TARGET_DIR: x"))).toBe(true);
+    expect(isPathOutsideTargetDirError("PATH_NOT_FOUND: gone")).toBe(false);
+    expect(isPathOutsideTargetDirError(null)).toBe(false);
+
+    expect(isPathNotFoundError("PATH_NOT_FOUND: gone")).toBe(true);
+    expect(isPathNotFoundError(new Error("PATH_NOT_FOUND: gone"))).toBe(true);
+    expect(isPathNotFoundError("io error: nope")).toBe(false);
+    expect(isPathNotFoundError(undefined)).toBe(false);
   });
 });

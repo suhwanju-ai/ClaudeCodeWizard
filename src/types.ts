@@ -64,3 +64,22 @@ export interface StageEventPayload {
   stageId: string;
   event: StageEvent;
 }
+
+/**
+ * Mirrors of `src-tauri/src/engine/project_files.rs`. Hand-written, like every other
+ * type in this file: a commit that changes those Rust structs changes these in the same
+ * commit (TRD 9.9-(3)). A Rust test pins the serialized key names.
+ */
+export type EntryKind = "file" | "directory" | "symlink" | "other";
+
+export interface DirEntry {
+  name: string;
+  kind: EntryKind;
+  size: number | null;
+  modifiedMs: number | null;
+}
+
+export interface DirListing {
+  path: string;
+  entries: DirEntry[];
+}

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { RunRecord, Stage, StageEventPayload, Template } from "./types";
+import type { DirListing, RunRecord, Stage, StageEventPayload, Template } from "./types";
 
 export function listTemplates(): Promise<Template[]> {
   return invoke("list_templates");
@@ -76,4 +76,35 @@ export function isStaleStageIndexError(error: unknown): boolean {
   if (error === null || error === undefined) return false;
   const text = typeof error === "string" ? error : error instanceof Error ? error.message : String(error);
   return text.includes(STALE_STAGE_INDEX_PREFIX);
+}
+
+/**
+ * Read-only listing of one directory level under this run's targetDir. `subPath` is
+ * relative to that dir — "" is the dir itself. The frontend cannot name a root: the
+ * backend derives it from the run record, which is what makes the containment check a
+ * real defence rather than a check against a caller-chosen root (TRD 9.2-(2)).
+ */
+export function listProjectDir(runId: string, subPath: string): Promise<DirListing> {
+  return invoke("list_project_dir", { runId, subPath });
+}
+
+/**
+ * Same contract as STALE_STAGE_INDEX_PREFIX above: these prefixes are set on the Rust
+ * side in ProjectFilesError and are the only way to tell these two errors apart once
+ * Tauri has collapsed them to strings. A Rust test pins both.
+ */
+export const PATH_OUTSIDE_TARGET_DIR_PREFIX = "PATH_OUTSIDE_TARGET_DIR:";
+export const PATH_NOT_FOUND_PREFIX = "PATH_NOT_FOUND:";
+
+function errorText(error: unknown): string {
+  if (error === null || error === undefined) return "";
+  return typeof error === "string" ? error : error instanceof Error ? error.message : String(error);
+}
+
+export function isPathOutsideTargetDirError(error: unknown): boolean {
+  return errorText(error).includes(PATH_OUTSIDE_TARGET_DIR_PREFIX);
+}
+
+export function isPathNotFoundError(error: unknown): boolean {
+  return errorText(error).includes(PATH_NOT_FOUND_PREFIX);
 }
