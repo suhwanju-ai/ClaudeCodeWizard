@@ -341,4 +341,67 @@ mod tests {
     fn classify_entry_kind_treats_indeterminate_file_type_as_other() {
         assert_eq!(classify_entry_kind(None), EntryKind::Other);
     }
+
+    /// Creates a symlink to a directory, or returns false when the platform refuses.
+    /// Windows requires Developer Mode or elevation for `symlink_dir`, so U-G1b can be
+    /// skipped there — which is exactly why U-G2 above exists as its always-running
+    /// partner. Do not delete either one (TRD 11.1 note).
+    #[cfg(unix)]
+    fn try_symlink_dir(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn try_symlink_dir(target: &Path, link: &Path) -> bool {
+        std::os::windows::fs::symlink_dir(target, link).is_ok()
+    }
+
+    #[cfg(unix)]
+    fn try_symlink_file(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn try_symlink_file(target: &Path, link: &Path) -> bool {
+        std::os::windows::fs::symlink_file(target, link).is_ok()
+    }
+
+    /// U-G1b — PRD G-1(b). The segment check cannot see this: `escape` is a single
+    /// normal segment. Only the canonical prefix comparison catches it.
+    #[tokio::test]
+    async fn rejects_a_symlink_that_points_outside_the_target_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), b"secret").unwrap();
+
+        if !try_symlink_dir(outside.path(), &root.path().join("escape")) {
+            eprintln!("skipping U-G1b: this platform refused to create a directory symlink");
+            return;
+        }
+
+        match resolve_within(root.path(), "escape").await {
+            Err(ProjectFilesError::OutsideTargetDir(_)) => {}
+            other => panic!("expected OutsideTargetDir, got {other:?}"),
+        }
+    }
+
+    /// U-G-s7 — the link is reported as a link, and its `size` is not the target's size,
+    /// so nothing about a file outside targetDir leaks through the listing.
+    #[tokio::test]
+    async fn symlink_entries_are_reported_as_symlink_kind() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("secret.txt");
+        std::fs::write(&target, b"0123456789ABCDEF").unwrap(); // 16 bytes
+
+        if !try_symlink_file(&target, &root.path().join("link.txt")) {
+            eprintln!("skipping U-G-s7: this platform refused to create a file symlink");
+            return;
+        }
+
+        let listing = list_dir(root.path(), "").await.unwrap();
+        let link = listing.entries.iter().find(|e| e.name == "link.txt").unwrap();
+        assert_eq!(link.kind, EntryKind::Symlink);
+        assert_ne!(link.size, Some(16));
+    }
 }
