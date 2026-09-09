@@ -17,7 +17,15 @@ interface Props {
   template: Template;
   onFinished: () => void;
   onEditTemplate: (template: Template) => void;
+  /**
+   * False only during App.tsx's optimistic pendingRun window, before the backend has
+   * validated and created targetDir (IMP-034). Optional and defaulting to true so the
+   * pre-tab render calls keep compiling unchanged (TRD 9.12-(2)).
+   */
+  runConfirmed?: boolean;
 }
+
+type RunTab = "run" | "files";
 
 interface LogLine {
   kind: string;
@@ -81,7 +89,7 @@ function statusBadgeClass(status: RunRecord["status"]): string {
   return "badge";
 }
 
-export default function PipelineRun({ initialRun, template, onFinished, onEditTemplate }: Props) {
+export default function PipelineRun({ initialRun, template, onFinished, onEditTemplate, runConfirmed = true }: Props) {
   const [run, setRun] = useState<RunRecord>(initialRun);
   // The run's own resolved names win over the template's: a pre-start edit can rename a
   // stage for this run only.
@@ -95,6 +103,15 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stageDraft, setStageDraft] = useState<Stage | null>(null);
+  const [tab, setTab] = useState<RunTab>("run");
+
+  // The error alert lives inside the 실행 tab (PRD G-12 keeps all seven blocks there), so
+  // a failure raised while the user is on 파일 has to bring them back or it is invisible
+  // (TRD 9.1-(2)(c)).
+  const fail = (e: unknown) => {
+    setError(String(e));
+    setTab("run");
+  };
 
   useEffect(() => {
     setRun(initialRun);
@@ -141,7 +158,7 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
         onFinished();
       }
     } catch (e) {
-      setError(String(e));
+      fail(e);
     } finally {
       setBusy(false);
     }
@@ -155,7 +172,7 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
       setRun(updated);
       setFeedback("");
     } catch (e) {
-      setError(String(e));
+      fail(e);
     } finally {
       setBusy(false);
     }
@@ -169,7 +186,7 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
       setRun(updated);
       onFinished();
     } catch (e) {
-      setError(String(e));
+      fail(e);
     } finally {
       setBusy(false);
     }
@@ -195,10 +212,10 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
         try {
           setRun(await getRun(run.runId));
         } catch (refreshError) {
-          setError(String(refreshError));
+          fail(refreshError);
         }
       } else {
-        setError(String(e));
+        fail(e);
       }
     } finally {
       setBusy(false);
@@ -213,7 +230,7 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
       setRun(updated);
       onFinished();
     } catch (e) {
-      setError(String(e));
+      fail(e);
     } finally {
       setBusy(false);
     }
@@ -249,110 +266,137 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
       </div>
 
       <div style={{ flex: 1, minWidth: 0 }}>
-        {error && (
-          <p className="alert" role="alert">
-            {error}
-          </p>
-        )}
-
-        <div style={{ marginBottom: 14 }}>
-          <span className={statusBadgeClass(run.status)}>상태: {run.status}</span>
+        <div className="segmented" role="tablist" style={{ marginBottom: 14 }}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "run"}
+            className={`segmented__option ${tab === "run" ? "segmented__option--selected" : ""}`}
+            onClick={() => setTab("run")}
+          >
+            실행
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "files"}
+            className={`segmented__option ${tab === "files" ? "segmented__option--selected" : ""}`}
+            onClick={() => setTab("files")}
+          >
+            파일
+          </button>
         </div>
 
-        <div className="card" style={{ marginBottom: 16, minHeight: 120 }}>
-          {log.length === 0 && <p className="help-text">아직 로그가 없습니다.</p>}
-          {log.map((line, i) => (
-            <div key={i} className="log-line">
-              <span className={`log-line__label ${logLabelClass(line.kind)}`}>{line.kind}</span>
-              <span className="log-line__body">{line.text}</span>
+        {tab === "run" && (
+          <>
+            {error && (
+              <p className="alert" role="alert">
+                {error}
+              </p>
+            )}
+
+            <div style={{ marginBottom: 14 }}>
+              <span className={statusBadgeClass(run.status)}>상태: {run.status}</span>
             </div>
-          ))}
-        </div>
 
-        {run.status === "awaiting-checkpoint" && (
-          <div className="card">
-            <div className="section-label">체크포인트 — 계속 진행할까요?</div>
+            <div className="card" style={{ marginBottom: 16, minHeight: 120 }}>
+              {log.length === 0 && <p className="help-text">아직 로그가 없습니다.</p>}
+              {log.map((line, i) => (
+                <div key={i} className="log-line">
+                  <span className={`log-line__label ${logLabelClass(line.kind)}`}>{line.kind}</span>
+                  <span className="log-line__body">{line.text}</span>
+                </div>
+              ))}
+            </div>
 
-            {changedFiles.length > 0 && (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "10px 0" }}>
-                {changedFiles.map((path) => (
-                  <span key={path} className="badge mono">
-                    {path}
-                  </span>
-                ))}
+            {run.status === "awaiting-checkpoint" && (
+              <div className="card">
+                <div className="section-label">체크포인트 — 계속 진행할까요?</div>
+
+                {changedFiles.length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "10px 0" }}>
+                    {changedFiles.map((path) => (
+                      <span key={path} className="badge mono">
+                        {path}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                <div className="field" style={{ margin: "12px 0" }}>
+                  <label htmlFor="feedback">수정 요청 내용</label>
+                  <textarea
+                    id="feedback"
+                    className="textarea"
+                    rows={3}
+                    value={feedback}
+                    onChange={(e) => setFeedback(e.target.value)}
+                  />
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <button className="btn btn-success" onClick={handleApprove} disabled={busy}>
+                    승인
+                  </button>
+                  <button className="btn btn-outline" onClick={handleRequestChanges} disabled={busy}>
+                    수정 요청 보내기
+                  </button>
+                  <span style={{ flex: 1 }} />
+                  <button className="btn btn-danger-outline" onClick={handleReject} disabled={busy}>
+                    거부
+                  </button>
+                </div>
               </div>
             )}
 
-            <div className="field" style={{ margin: "12px 0" }}>
-              <label htmlFor="feedback">수정 요청 내용</label>
-              <textarea
-                id="feedback"
-                className="textarea"
-                rows={3}
-                value={feedback}
-                onChange={(e) => setFeedback(e.target.value)}
-              />
-            </div>
+            {run.status === "awaiting-stage-start" && stageDraft && (
+              <div className="card">
+                <div className="section-label">다음 단계 — 실행 전 확인/수정</div>
+                <p className="help-text" style={{ marginBottom: 12 }}>
+                  여기서 고친 내용은 이 run에만 적용되며 저장된 템플릿은 바뀌지 않습니다.
+                </p>
 
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <button className="btn btn-success" onClick={handleApprove} disabled={busy}>
-                승인
-              </button>
-              <button className="btn btn-outline" onClick={handleRequestChanges} disabled={busy}>
-                수정 요청 보내기
-              </button>
-              <span style={{ flex: 1 }} />
-              <button className="btn btn-danger-outline" onClick={handleReject} disabled={busy}>
-                거부
-              </button>
-            </div>
-          </div>
-        )}
+                <StageFields
+                  stage={stageDraft}
+                  onChange={(patch) => setStageDraft((s) => (s ? { ...s, ...patch } : s))}
+                  idPrefix="run-stage"
+                  promptLabel="이 단계 프롬프트"
+                  lockId
+                />
 
-        {run.status === "awaiting-stage-start" && stageDraft && (
-          <div className="card">
-            <div className="section-label">다음 단계 — 실행 전 확인/수정</div>
-            <p className="help-text" style={{ marginBottom: 12 }}>
-              여기서 고친 내용은 이 run에만 적용되며 저장된 템플릿은 바뀌지 않습니다.
-            </p>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16 }}>
+                  <button className="btn btn-success" onClick={handleStartStage} disabled={busy}>
+                    이 단계 실행
+                  </button>
+                  <span style={{ flex: 1 }} />
+                  <button className="btn btn-danger-outline" onClick={handleCancelRun} disabled={busy}>
+                    이 run 취소
+                  </button>
+                </div>
+              </div>
+            )}
 
-            <StageFields
-              stage={stageDraft}
-              onChange={(patch) => setStageDraft((s) => (s ? { ...s, ...patch } : s))}
-              idPrefix="run-stage"
-              promptLabel="이 단계 프롬프트"
-              lockId
-            />
+            {run.status === "failed" && (
+              <div className="card">
+                <div className="section-label">이 run은 실패로 종료되었습니다</div>
+                <p className="help-text">
+                  실패한 단계는 이 run에서 다시 시작할 수 없습니다. 프롬프트를 고쳐 다시 시도하려면 새 run을 시작하세요.
+                </p>
+              </div>
+            )}
 
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16 }}>
-              <button className="btn btn-success" onClick={handleStartStage} disabled={busy}>
-                이 단계 실행
+            <div style={{ marginTop: 18, display: "flex", gap: 8 }}>
+              <button className="btn btn-outline" onClick={handleEditTemplate}>
+                원본 템플릿 편집 (모든 향후 실행에 적용)
               </button>
-              <span style={{ flex: 1 }} />
-              <button className="btn btn-danger-outline" onClick={handleCancelRun} disabled={busy}>
-                이 run 취소
+              <button className="btn btn-outline" onClick={onFinished}>
+                갤러리로 돌아가기
               </button>
             </div>
-          </div>
+          </>
         )}
 
-        {run.status === "failed" && (
-          <div className="card">
-            <div className="section-label">이 run은 실패로 종료되었습니다</div>
-            <p className="help-text">
-              실패한 단계는 이 run에서 다시 시작할 수 없습니다. 프롬프트를 고쳐 다시 시도하려면 새 run을 시작하세요.
-            </p>
-          </div>
-        )}
-
-        <div style={{ marginTop: 18, display: "flex", gap: 8 }}>
-          <button className="btn btn-outline" onClick={handleEditTemplate}>
-            원본 템플릿 편집 (모든 향후 실행에 적용)
-          </button>
-          <button className="btn btn-outline" onClick={onFinished}>
-            갤러리로 돌아가기
-          </button>
-        </div>
+        {tab === "files" && <div data-testid="file-tab-placeholder" />}
       </div>
     </div>
   );

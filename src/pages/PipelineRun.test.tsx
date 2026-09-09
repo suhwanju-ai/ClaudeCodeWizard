@@ -328,4 +328,73 @@ describe("PipelineRun", () => {
     render(<PipelineRun initialRun={renamed} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />);
     expect(screen.getByText("이 run에서만 바꾼 이름: awaiting-start")).toBeInTheDocument();
   });
+
+  // F-G12a — PRD G-12/G-16. The strip reuses the existing .segmented visual language.
+  it("renders a tab strip with 실행 selected by default", () => {
+    const { container } = render(
+      <PipelineRun initialRun={runningRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />
+    );
+    const strip = container.querySelector(".segmented");
+    expect(strip).toBeInTheDocument();
+    const runTab = screen.getByRole("tab", { name: "실행" });
+    const filesTab = screen.getByRole("tab", { name: "파일" });
+    expect(runTab).toHaveClass("segmented__option--selected");
+    expect(filesTab).not.toHaveClass("segmented__option--selected");
+    expect(runTab).toHaveAttribute("aria-selected", "true");
+  });
+
+  // F-G12b — PRD G-7/G-12. The representative regression assertion: the existing blocks
+  // are queried exactly as the 23 pre-tab tests query them (TRD 9.11-(3)).
+  it("keeps every existing run-screen block visible on the default tab", () => {
+    render(
+      <PipelineRun initialRun={runningRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />
+    );
+    expect(screen.getByText("상태: awaiting-checkpoint")).toBeInTheDocument();
+    expect(screen.getByText("아직 로그가 없습니다.")).toBeInTheDocument();
+    expect(screen.getByText("체크포인트 — 계속 진행할까요?")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "승인" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "수정 요청 보내기" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "거부" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "원본 템플릿 편집 (모든 향후 실행에 적용)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "갤러리로 돌아가기" })).toBeInTheDocument();
+  });
+
+  // F-G12c — PRD G-12: the 240px left column lives outside the tabs.
+  it("keeps the left column visible on the 파일 tab", () => {
+    render(
+      <PipelineRun initialRun={runningRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "파일" }));
+    expect(screen.getByText("웹 프로그램 개발")).toBeInTheDocument();
+    expect(screen.getByText("/tmp/proj")).toBeInTheDocument();
+    expect(screen.getByText("요구사항 정리: awaiting-checkpoint")).toBeInTheDocument();
+    // And the run-tab content is gone.
+    expect(screen.queryByRole("button", { name: "승인" })).not.toBeInTheDocument();
+  });
+
+  // F-G23 — TRD 9.1-(2)(c). The error alert lives in the 실행 tab, so a failure raised
+  // while the user is on 파일 would otherwise be an invisible regression.
+  it("returns to the 실행 tab when an action fails while the 파일 tab is open", async () => {
+    // The rejection is held open on purpose: the user has to be sitting on the 파일 tab
+    // at the moment it lands, which is the whole scenario.
+    let rejectApprove: (reason: unknown) => void = () => {};
+    vi.mocked(approveCheckpoint).mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectApprove = reject;
+      })
+    );
+    render(
+      <PipelineRun initialRun={runningRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />
+    );
+    fireEvent.click(screen.getByRole("button", { name: "승인" }));
+    fireEvent.click(screen.getByRole("tab", { name: "파일" }));
+    expect(screen.getByRole("tab", { name: "파일" })).toHaveClass("segmented__option--selected");
+
+    await act(async () => {
+      rejectApprove("boom");
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent("boom");
+    expect(screen.getByRole("tab", { name: "실행" })).toHaveClass("segmented__option--selected");
+  });
 });
