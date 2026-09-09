@@ -19,12 +19,23 @@ vi.mock("./api", async () => {
     // The real predicate and prefix — App never calls them, but PipelineRun does.
     isStaleStageIndexError: actual.isStaleStageIndexError,
     STALE_STAGE_INDEX_PREFIX: actual.STALE_STAGE_INDEX_PREFIX,
+    listProjectDir: vi.fn(),
+    isPathNotFoundError: actual.isPathNotFoundError,
+    isPathOutsideTargetDirError: actual.isPathOutsideTargetDirError,
   };
 });
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 
-import { listTemplates, checkCli, saveTemplate, startPipelineRun, onStageEvent, startStage } from "./api";
+import {
+  listTemplates,
+  checkCli,
+  saveTemplate,
+  startPipelineRun,
+  onStageEvent,
+  startStage,
+  listProjectDir,
+} from "./api";
 import { open } from "@tauri-apps/plugin-dialog";
 import App from "./App";
 import type { RunRecord, Template } from "./types";
@@ -159,5 +170,33 @@ describe("App routing", () => {
     expect(await screen.findByRole("button", { name: "저장" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "실행" })).not.toBeInTheDocument();
     expect(open).not.toHaveBeenCalled();
+  });
+
+  // F-G-app — IMP-034: the optimistic record is not confirmed, so the file tab must not
+  // query it; once startPipelineRun answers, it may.
+  it("marks the run unconfirmed until startPipelineRun answers", async () => {
+    vi.mocked(listTemplates).mockResolvedValue([sample]);
+    vi.mocked(checkCli).mockResolvedValue("available:1.0.0");
+    vi.mocked(open).mockResolvedValue("/tmp/new-project");
+    vi.mocked(listProjectDir).mockResolvedValue({ path: "", entries: [] });
+    let resolveStart: (r: RunRecord) => void = () => {};
+    vi.mocked(startPipelineRun).mockReturnValue(
+      new Promise<RunRecord>((resolve) => {
+        resolveStart = resolve;
+      })
+    );
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "실행" }));
+
+    // The optimistic window: the file tab shows the notice and calls nothing.
+    fireEvent.click(await screen.findByRole("tab", { name: "파일" }));
+    expect(
+      await screen.findByText("실행을 준비하는 중입니다 — 폴더를 확인한 뒤 목록을 불러옵니다.")
+    ).toBeInTheDocument();
+    expect(listProjectDir).not.toHaveBeenCalled();
+
+    resolveStart(backendRun);
+    await waitFor(() => expect(listProjectDir).toHaveBeenCalledWith(backendRun.runId, ""));
   });
 });

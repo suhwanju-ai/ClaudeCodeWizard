@@ -444,4 +444,35 @@ describe("PipelineRun", () => {
       )
     ).toBeInTheDocument();
   });
+
+  // F-G14 — PRD G-14: no unexplained empty list, no raw error, in the optimistic window.
+  it("waits for the run to be confirmed before listing", async () => {
+    const { rerender } = render(
+      <PipelineRun
+        initialRun={runningRun}
+        template={sampleTemplate}
+        onFinished={vi.fn()}
+        onEditTemplate={vi.fn()}
+        runConfirmed={false}
+      />
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "파일" }));
+    expect(
+      screen.getByText("실행을 준비하는 중입니다 — 폴더를 확인한 뒤 목록을 불러옵니다.")
+    ).toBeInTheDocument();
+    expect(listProjectDir).not.toHaveBeenCalled();
+    // The 파일 tab button itself stays enabled — disabling it would hide the reason.
+    expect(screen.getByRole("tab", { name: "파일" })).not.toBeDisabled();
+
+    rerender(
+      <PipelineRun
+        initialRun={runningRun}
+        template={sampleTemplate}
+        onFinished={vi.fn()}
+        onEditTemplate={vi.fn()}
+        runConfirmed
+      />
+    );
+    await waitFor(() => expect(listProjectDir).toHaveBeenCalledWith("run1", ""));
+  });
 });

@@ -10,7 +10,10 @@ import type { RunRecord, Template } from "./types";
 type View =
   | { name: "gallery" }
   | { name: "editor"; template: Template | null }
-  | { name: "run"; run: RunRecord; template: Template };
+  // `confirmed` is false only between the optimistic pendingRun and the backend's
+  // answer. It rides on the view rather than on RunRecord because adding a field to the
+  // record would be a schema change with a migration attached (IMP-034 / TRD 9.12-(1)).
+  | { name: "run"; run: RunRecord; template: Template; confirmed: boolean };
 
 function CliStatus() {
   const [status, setStatus] = useState<string>("checking");
@@ -87,9 +90,9 @@ export default function App() {
         // the panel blank until the backend replied.
         resolvedStages: template.stages,
       };
-      setView({ name: "run", run: pendingRun, template });
+      setView({ name: "run", run: pendingRun, template, confirmed: false });
       const run = await startPipelineRun(template.id, targetDir, runId);
-      setView({ name: "run", run, template });
+      setView({ name: "run", run, template, confirmed: true });
     } catch (e) {
       setError(String(e));
       setView({ name: "gallery" });
@@ -112,6 +115,7 @@ export default function App() {
         template={view.template}
         onFinished={() => setView({ name: "gallery" })}
         onEditTemplate={(template) => setView({ name: "editor", template })}
+        runConfirmed={view.confirmed}
       />
     );
   } else {
