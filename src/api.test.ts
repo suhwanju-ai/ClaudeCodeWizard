@@ -159,10 +159,10 @@ describe("api wrapper", () => {
 
   // F-G-api — PRD G-19/G-20.
   it("listProjectDir invokes list_project_dir with camelCase args", async () => {
-    invokeMock.mockResolvedValue({ path: "", entries: [] });
+    invokeMock.mockResolvedValue({ path: "", entries: [], truncated: false });
     const result = await listProjectDir("run1", "src/engine");
     expect(invokeMock).toHaveBeenCalledWith("list_project_dir", { runId: "run1", subPath: "src/engine" });
-    expect(result).toEqual({ path: "", entries: [] });
+    expect(result).toEqual({ path: "", entries: [], truncated: false });
   });
 
   it("recognizes the two project-file error prefixes and nothing else", () => {

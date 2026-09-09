@@ -47,6 +47,12 @@ pub struct DirEntry {
     pub modified_ms: Option<i64>,
 }
 
+/// Hard cap on the number of entries returned by one `list_dir` call. Bounds both the
+/// IPC serialization cost and the webview render cost for pathological directories (e.g.
+/// `node_modules`). Added from a code-review finding — GAP-F2 (bulk/large-directory
+/// policy) is still open, so this is a safety bound, not that policy's answer.
+const MAX_ENTRIES: usize = 2000;
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DirListing {
@@ -54,6 +60,10 @@ pub struct DirListing {
     /// Neither an absolute path nor a Windows `\\?\` prefix ever appears here.
     pub path: String,
     pub entries: Vec<DirEntry>,
+    /// True when the directory had more than `MAX_ENTRIES` entries and the list below
+    /// was cut short. The cut is by read order, not by the sort order applied to
+    /// `entries` below — this is a size bound, not a "top N" view.
+    pub truncated: bool,
 }
 
 /// Layer 1 of the containment defence (TRD 9.3-(2) step 1): a pure, filesystem-free
@@ -145,7 +155,12 @@ pub async fn list_dir(root: &Path, sub_path: &str) -> Result<DirListing, Project
 
     let mut read_dir = tokio::fs::read_dir(&dir).await?;
     let mut entries: Vec<DirEntry> = Vec::new();
+    let mut truncated = false;
     while let Some(entry) = read_dir.next_entry().await? {
+        if entries.len() >= MAX_ENTRIES {
+            truncated = true;
+            break;
+        }
         let name = entry.file_name().to_string_lossy().to_string();
         // `file_type()` on a directory entry does not follow the link, so a symlink is
         // reported as itself (PRD G-1(b) support). The browsed directory can be actively
@@ -172,7 +187,7 @@ pub async fn list_dir(root: &Path, sub_path: &str) -> Result<DirListing, Project
             .cmp(&(b.kind != EntryKind::Directory, b.name.as_str()))
     });
 
-    Ok(DirListing { path: relative, entries })
+    Ok(DirListing { path: relative, entries, truncated })
 }
 
 #[cfg(test)]
@@ -322,12 +337,35 @@ mod tests {
                 DirEntry { name: "engine".into(), kind: EntryKind::Directory, size: None, modified_ms: None },
                 DirEntry { name: "main.rs".into(), kind: EntryKind::File, size: Some(12), modified_ms: Some(1) },
             ],
+            truncated: false,
         };
         let json = serde_json::to_string(&listing).unwrap();
         assert_eq!(
             json,
-            r#"{"path":"src","entries":[{"name":"engine","kind":"directory","size":null,"modifiedMs":null},{"name":"main.rs","kind":"file","size":12,"modifiedMs":1}]}"#
+            r#"{"path":"src","entries":[{"name":"engine","kind":"directory","size":null,"modifiedMs":null},{"name":"main.rs","kind":"file","size":12,"modifiedMs":1}],"truncated":false}"#
         );
+    }
+
+    /// Covers the fix for the code-review finding: a directory with more entries than
+    /// `MAX_ENTRIES` is cut short and reports `truncated: true`, instead of serializing
+    /// an unbounded list over IPC.
+    #[tokio::test]
+    async fn caps_entry_count_and_reports_truncation() {
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..(MAX_ENTRIES + 10) {
+            std::fs::write(tmp.path().join(format!("file-{i:05}.txt")), b"x").unwrap();
+        }
+        let listing = list_dir(tmp.path(), "").await.unwrap();
+        assert_eq!(listing.entries.len(), MAX_ENTRIES);
+        assert!(listing.truncated);
+    }
+
+    /// A directory at or under the cap is not marked truncated.
+    #[tokio::test]
+    async fn does_not_truncate_a_small_directory() {
+        let tmp = listing_fixture();
+        let listing = list_dir(tmp.path(), "").await.unwrap();
+        assert!(!listing.truncated);
     }
 
     /// Covers the fix for the Important review finding: a single entry whose

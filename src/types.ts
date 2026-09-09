@@ -82,4 +82,6 @@ export interface DirEntry {
 export interface DirListing {
   path: string;
   entries: DirEntry[];
+  /** True when the directory had more entries than the backend's cap and the list was cut short. */
+  truncated: boolean;
 }

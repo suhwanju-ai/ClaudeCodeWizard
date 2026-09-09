@@ -71,7 +71,7 @@ beforeEach(() => {
   vi.mocked(startStage).mockReset();
   vi.mocked(cancelRun).mockReset();
   vi.mocked(getRun).mockReset();
-  vi.mocked(listProjectDir).mockReset().mockResolvedValue({ path: "", entries: [] });
+  vi.mocked(listProjectDir).mockReset().mockResolvedValue({ path: "", entries: [], truncated: false });
 });
 
 describe("PipelineRun", () => {
@@ -419,6 +419,7 @@ describe("PipelineRun", () => {
         { name: "src", kind: "directory", size: null, modifiedMs: null },
         { name: "main.rs", kind: "file", size: 12, modifiedMs: 1757400000000 },
       ],
+      truncated: false,
     });
     render(
       <PipelineRun initialRun={runningRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />

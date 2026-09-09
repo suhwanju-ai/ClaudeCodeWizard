@@ -178,7 +178,7 @@ describe("App routing", () => {
     vi.mocked(listTemplates).mockResolvedValue([sample]);
     vi.mocked(checkCli).mockResolvedValue("available:1.0.0");
     vi.mocked(open).mockResolvedValue("/tmp/new-project");
-    vi.mocked(listProjectDir).mockResolvedValue({ path: "", entries: [] });
+    vi.mocked(listProjectDir).mockResolvedValue({ path: "", entries: [], truncated: false });
     let resolveStart: (r: RunRecord) => void = () => {};
     vi.mocked(startPipelineRun).mockReturnValue(
       new Promise<RunRecord>((resolve) => {

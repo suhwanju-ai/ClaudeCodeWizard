@@ -31,14 +31,16 @@ const rootListing: DirListing = {
     { name: "src", kind: "directory", size: null, modifiedMs: null },
     { name: "main.rs", kind: "file", size: 2100, modifiedMs: 1757400000000 },
   ],
+  truncated: false,
 };
 
 const srcListing: DirListing = {
   path: "src",
   entries: [{ name: "engine", kind: "directory", size: null, modifiedMs: null }],
+  truncated: false,
 };
 
-const engineListing: DirListing = { path: "src/engine", entries: [] };
+const engineListing: DirListing = { path: "src/engine", entries: [], truncated: false };
 
 beforeEach(() => {
   vi.mocked(listProjectDir).mockReset();
@@ -160,6 +162,19 @@ describe("FileBrowser", () => {
     vi.mocked(listProjectDir).mockResolvedValue(engineListing);
     render(<FileBrowser run={run} confirmed changedFiles={[]} />);
     expect(await screen.findByText("이 폴더는 비어 있습니다.")).toBeInTheDocument();
+  });
+
+  it("notices the user when the backend truncated a large directory", async () => {
+    vi.mocked(listProjectDir).mockResolvedValue({ ...rootListing, truncated: true });
+    render(<FileBrowser run={run} confirmed changedFiles={[]} />);
+    expect(await screen.findByText("항목이 너무 많아 일부만 표시합니다.")).toBeInTheDocument();
+  });
+
+  it("does not show the truncation notice for a normal listing", async () => {
+    vi.mocked(listProjectDir).mockResolvedValue(rootListing);
+    render(<FileBrowser run={run} confirmed changedFiles={[]} />);
+    await screen.findByRole("button", { name: "src" });
+    expect(screen.queryByText("항목이 너무 많아 일부만 표시합니다.")).not.toBeInTheDocument();
   });
 
   it("re-fetches the current path when 새로고침 is clicked", async () => {

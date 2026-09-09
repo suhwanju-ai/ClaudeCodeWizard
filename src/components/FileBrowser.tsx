@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { isPathNotFoundError, isPathOutsideTargetDirError, listProjectDir } from "../api";
 import type { DirEntry, DirListing, RunRecord } from "../types";
 
@@ -103,17 +103,17 @@ export default function FileBrowser({ run, confirmed, changedFiles }: FileBrowse
     };
   }, [run.runId, path, confirmed, refreshNonce]);
 
-  const enter = (name: string) => {
+  const enter = useCallback((name: string) => {
     setNotice(null);
-    setPath(path === "" ? name : `${path}/${name}`);
-  };
+    setPath((current) => (current === "" ? name : `${current}/${name}`));
+  }, []);
 
   // '..' is never sent to the command — the backend rejects it outright (TRD 9.3-(2)
   // step 1), so the truncation happens here.
-  const goUp = () => {
+  const goUp = useCallback(() => {
     setNotice(null);
-    setPath(parentOf(path));
-  };
+    setPath((current) => parentOf(current));
+  }, []);
 
   const crumbs = path === "" ? [] : path.split("/");
 
@@ -135,7 +135,7 @@ export default function FileBrowser({ run, confirmed, changedFiles }: FileBrowse
       <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 12 }}>
         <span className="badge mono">프로젝트 루트</span>
         {crumbs.map((crumb, i) => (
-          <span key={`${crumb}-${i}`} className="badge mono">
+          <span key={crumbs.slice(0, i + 1).join("/")} className="badge mono">
             {crumb}
           </span>
         ))}
@@ -162,6 +162,9 @@ export default function FileBrowser({ run, confirmed, changedFiles }: FileBrowse
 
       {!loading && listing && listing.entries.length === 0 && (
         <p className="help-text">이 폴더는 비어 있습니다.</p>
+      )}
+      {!loading && listing && listing.truncated && (
+        <p className="help-text">항목이 너무 많아 일부만 표시합니다.</p>
       )}
 
       {!loading &&
