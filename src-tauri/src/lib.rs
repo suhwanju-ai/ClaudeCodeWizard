@@ -47,6 +47,7 @@ pub fn run() {
             commands::reject_checkpoint,
             commands::cancel_run,
             commands::get_run,
+            commands::list_project_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

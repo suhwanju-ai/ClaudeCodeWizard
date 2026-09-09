@@ -3,6 +3,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::cli_check::{check_claude_cli, CliCheckResult};
 use crate::engine::orchestrator::Orchestrator;
+use crate::engine::project_files::DirListing;
 use crate::engine::run_record::RunRecord;
 use crate::engine::stream_json::StageEvent;
 use crate::template::Template;
@@ -120,4 +121,16 @@ pub fn cancel_run(orchestrator: State<Orchestrator>, run_id: String) -> Result<R
 #[tauri::command]
 pub fn get_run(orchestrator: State<Orchestrator>, run_id: String) -> Result<RunRecord, String> {
     orchestrator.run_store.load(&run_id).map_err(|e| e.to_string())
+}
+
+/// Read-only, like `get_run` above: it changes no state and takes no run lock
+/// (IMP-027). The frontend cannot name a root — it sends the run id and a path relative
+/// to that run's targetDir, and the backend derives the root itself (TRD 9.2-(2)).
+#[tauri::command]
+pub async fn list_project_dir(
+    orchestrator: State<'_, Orchestrator>,
+    run_id: String,
+    sub_path: String,
+) -> Result<DirListing, String> {
+    orchestrator.list_project_dir(&run_id, &sub_path).await.map_err(|e| e.to_string())
 }

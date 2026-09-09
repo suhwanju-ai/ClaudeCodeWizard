@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::template::{
@@ -8,6 +8,7 @@ use crate::template::{
 };
 
 use super::executor::{run_stage, ExecutorConfig};
+use super::project_files::{self, DirListing, ProjectFilesError};
 use super::project_manifest::{manifest_run_path, validate_target_dir, write_project_manifest, TargetDirError};
 use super::run_record::{
     RunRecord, RunRecordStore, RunRecordStoreError, RunStatus, StageOverrideError, StageStatus,
@@ -43,6 +44,8 @@ pub enum OrchestratorError {
     TargetDirInUse(String),
     #[error("run '{0}' cannot be cancelled in its current state")]
     NotCancellable(String),
+    #[error(transparent)]
+    ProjectFiles(#[from] ProjectFilesError),
 }
 
 impl From<StageOverrideError> for OrchestratorError {
@@ -386,5 +389,17 @@ impl Orchestrator {
         record.cancel();
         self.save(&record)?;
         Ok(record)
+    }
+
+    /// Read-only, exactly like `get_run` (commands.rs:118-123): it loads the record,
+    /// reads the filesystem, and returns. No `lock_for`, no `save`, no transition
+    /// (IMP-027).
+    pub async fn list_project_dir(
+        &self,
+        run_id: &str,
+        sub_path: &str,
+    ) -> Result<DirListing, OrchestratorError> {
+        let record = self.run_store.load(run_id)?;
+        project_files::list_dir(Path::new(&record.target_dir), sub_path).await.map_err(Into::into)
     }
 }
