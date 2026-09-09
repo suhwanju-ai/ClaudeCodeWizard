@@ -9,6 +9,7 @@ import {
   requestChanges,
   startStage,
 } from "../api";
+import FileBrowser from "../components/FileBrowser";
 import StageFields from "../components/StageFields";
 import type { RunRecord, Stage, StageEventPayload, StageStatus, Template } from "../types";
 
@@ -313,7 +314,10 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
               <div className="card">
                 <div className="section-label">체크포인트 — 계속 진행할까요?</div>
 
-                {changedFiles.length > 0 && (
+                <div className="section-label" style={{ marginTop: 10 }}>
+                  이번 단계에서 claude가 건드린 파일 (실행 로그 기준)
+                </div>
+                {changedFiles.length > 0 ? (
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "10px 0" }}>
                     {changedFiles.map((path) => (
                       <span key={path} className="badge mono">
@@ -321,6 +325,8 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
                       </span>
                     ))}
                   </div>
+                ) : (
+                  <p className="help-text">이번 단계에서 기록된 변경 파일이 없습니다.</p>
                 )}
 
                 <div className="field" style={{ margin: "12px 0" }}>
@@ -396,7 +402,7 @@ export default function PipelineRun({ initialRun, template, onFinished, onEditTe
           </>
         )}
 
-        {tab === "files" && <div data-testid="file-tab-placeholder" />}
+        {tab === "files" && <FileBrowser run={run} confirmed={runConfirmed} changedFiles={changedFiles} />}
       </div>
     </div>
   );

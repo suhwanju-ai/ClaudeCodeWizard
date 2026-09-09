@@ -14,10 +14,22 @@ vi.mock("../api", async () => {
     // The real predicate — the point of F-E6 is that the component uses it correctly.
     isStaleStageIndexError: actual.isStaleStageIndexError,
     STALE_STAGE_INDEX_PREFIX: actual.STALE_STAGE_INDEX_PREFIX,
+    listProjectDir: vi.fn(),
+    isPathNotFoundError: actual.isPathNotFoundError,
+    isPathOutsideTargetDirError: actual.isPathOutsideTargetDirError,
   };
 });
 
-import { onStageEvent, approveCheckpoint, requestChanges, rejectCheckpoint, startStage, cancelRun, getRun } from "../api";
+import {
+  onStageEvent,
+  approveCheckpoint,
+  requestChanges,
+  rejectCheckpoint,
+  startStage,
+  cancelRun,
+  getRun,
+  listProjectDir,
+} from "../api";
 import PipelineRun from "./PipelineRun";
 import type { RunRecord, Stage, StageEventPayload, Template } from "../types";
 
@@ -59,6 +71,7 @@ beforeEach(() => {
   vi.mocked(startStage).mockReset();
   vi.mocked(cancelRun).mockReset();
   vi.mocked(getRun).mockReset();
+  vi.mocked(listProjectDir).mockReset().mockResolvedValue({ path: "", entries: [] });
 });
 
 describe("PipelineRun", () => {
@@ -396,5 +409,39 @@ describe("PipelineRun", () => {
 
     expect(screen.getByRole("alert")).toHaveTextContent("boom");
     expect(screen.getByRole("tab", { name: "실행" })).toHaveClass("segmented__option--selected");
+  });
+
+  // F-G12d — PRD G-12: selecting 파일 lists the run's targetDir root.
+  it("lists the target dir root when the 파일 tab is selected", async () => {
+    vi.mocked(listProjectDir).mockResolvedValue({
+      path: "",
+      entries: [
+        { name: "src", kind: "directory", size: null, modifiedMs: null },
+        { name: "main.rs", kind: "file", size: 12, modifiedMs: 1757400000000 },
+      ],
+    });
+    render(
+      <PipelineRun initialRun={runningRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "파일" }));
+    await waitFor(() => expect(listProjectDir).toHaveBeenCalledWith("run1", ""));
+    expect(await screen.findByRole("button", { name: "src" })).toBeInTheDocument();
+    expect(screen.getByText("main.rs")).toBeInTheDocument();
+  });
+
+  // F-G17a — PRD G-17: the two information sources are labelled differently, so no
+  // screen puts them side by side unmarked.
+  it("labels the event-derived list and the measured list differently", async () => {
+    render(
+      <PipelineRun initialRun={runningRun} template={sampleTemplate} onFinished={vi.fn()} onEditTemplate={vi.fn()} />
+    );
+    // The checkpoint card's chips are event-derived.
+    expect(screen.getByText("이번 단계에서 claude가 건드린 파일 (실행 로그 기준)")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "파일" }));
+    expect(
+      await screen.findByText(
+        "이 폴더의 실제 내용입니다 (파일시스템 실측). 위 로그와 달리 지금 디스크에 있는 것을 그대로 보여줍니다."
+      )
+    ).toBeInTheDocument();
   });
 });
